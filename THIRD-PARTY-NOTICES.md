@@ -101,6 +101,14 @@ Website: https://github.com/multica-ai/andrej-karpathy-skills
 
 License: MIT according to [README.md](https://github.com/multica-ai/andrej-karpathy-skills/tree/main)
 
+### xiaozhi-esp32
+
+The ST77922 touch register logic (`Drivers/st77922-module`) and the ES3C35P panel init sequence (`Devices/es3c35p`) are ported from its `lcdwiki-es3c35p` board.
+
+Website: https://github.com/78/xiaozhi-esp32
+
+License: [MIT License](https://github.com/78/xiaozhi-esp32/blob/main/LICENSE)
+
 ### Other Dependencies
 
 Some dependencies contain their own license. For example: the subprojects in `Libraries/`

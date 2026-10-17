@@ -54,6 +54,10 @@ dependencies:
     version: "2.0.1~1"
     rules:
       - if: "target in [esp32s3]"
+  espressif/esp_lcd_st77922:
+    version: "2.1.1"
+    rules:
+      - if: "target in [esp32s3]"
   espressif/esp_lcd_jd9165:
     version: "2.0.2"
     rules:

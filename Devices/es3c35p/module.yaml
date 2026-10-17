@@ -1,0 +1,7 @@
+dependencies:
+  - Platforms/platform-esp32
+  - Drivers/st77922-module
+  - Drivers/es8311-module
+  - Drivers/audio-stream-module
+dts: es3c35p.dts
+dts-only: true

@@ -1,0 +1,47 @@
+description: Sitronix ST77922 display panel (QSPI)
+
+bus: spi
+
+compatible: "sitronix,st77922"
+
+properties:
+  horizontal-resolution:
+    type: int
+    required: true
+    description: Horizontal resolution in pixels
+  vertical-resolution:
+    type: int
+    required: true
+    description: Vertical resolution in pixels
+  invert-color:
+    type: boolean
+    default: false
+    description: Invert the panel's color output
+  bgr-order:
+    type: boolean
+    default: false
+    description: Use BGR element order instead of RGB
+  pixel-clock-hz:
+    type: int
+    default: 40000000
+    description: QSPI pixel clock frequency in Hz
+  transaction-queue-depth:
+    type: int
+    default: 10
+    description: Size of the internal SPI transaction queue
+  pin-reset:
+    type: phandles
+    default: GPIO_PIN_SPEC_NONE
+    description: Reset GPIO pin. Falls back to a software reset if not set.
+  init-sequence:
+    type: array
+    element-type: uint8_t
+    description: >
+      Custom vendor bring-up sequence, flattened into bytes as a run of
+      [cmd, data-length, delay-ms, data-length bytes of data...] entries, e.g.
+      `init-sequence = [0x11 0 120  0x29 0 20];`.
+      Omit to use the ST77922 component's own built-in default sequence.
+  backlight:
+    type: phandle
+    default: "NULL"
+    description: Optional reference to this display's backlight device
