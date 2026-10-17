@@ -126,6 +126,7 @@
 			compatible = "sitronix,st77922";
 			horizontal-resolution = <320>;
 			vertical-resolution = <480>;
+			invert-color;
 			pixel-clock-hz = <40000000>;
 			backlight = <&display_backlight>;
 
