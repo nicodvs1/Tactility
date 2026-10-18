@@ -424,8 +424,11 @@ static bool parseReply(const std::string& text, Reply& reply) {
 }
 
 std::string ask(const PromptContext& context, const std::vector<Turn>& history, const Pcm* audio, const std::string& text, Reply& reply) {
+    if (!context.config->problem.empty()) {
+        return context.config->problem;
+    }
     if (context.config->apiKey.empty()) {
-        return "Falta la clave de Gemini. Escríbala en el archivo config.json de la tarjeta SD.";
+        return "Falta la clave de Gemini. Péguela en el archivo clave_gemini.txt de la tarjeta SD.";
     }
 
     Buffer audioBase64;

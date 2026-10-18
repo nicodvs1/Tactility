@@ -8,6 +8,8 @@
 
 #include <cJSON.h>
 
+#include <cctype>
+#include <cstring>
 #include <format>
 #include <map>
 
@@ -16,6 +18,7 @@ namespace tt::app::devuelta {
 constexpr auto* TAG = "DeVuelta";
 
 constexpr auto* CONFIG_FILE = "config.json";
+constexpr auto* KEY_FILE = "clave_gemini.txt";
 constexpr auto* REMINDERS_FILE = "recordatorios.json";
 constexpr auto* FORM_FILE = "ficha_hora.json";
 
@@ -36,12 +39,41 @@ static std::string getFilePath(const char* fileName) {
     return file::getChildPath(getStoragePath(), fileName);
 }
 
+/** Skips the byte order mark that some editors write at the start of UTF-8 files */
+static const char* skipBom(const char* text) {
+    return strncmp(text, "\xEF\xBB\xBF", 3) == 0 ? text + 3 : text;
+}
+
 static cJSON* readJson(const char* fileName) {
     auto content = file::readString(getFilePath(fileName));
     if (content == nullptr) {
         return nullptr;
     }
-    return cJSON_Parse(reinterpret_cast<const char*>(content.get()));
+    return cJSON_Parse(skipBom(reinterpret_cast<const char*>(content.get())));
+}
+
+/** Removes the whitespace and quotes that easily end up around a pasted key */
+static std::string trimKey(const std::string& text) {
+    const auto isNoise = [](char c) { return std::isspace(static_cast<unsigned char>(c)) || c == '"' || c == '\''; };
+    size_t start = 0;
+    size_t end = text.size();
+    while (start < end && isNoise(text[start])) start++;
+    while (end > start && isNoise(text[end - 1])) end--;
+    return text.substr(start, end - start);
+}
+
+/** @return the first line of the key file, empty when it's missing or blank */
+static std::string readKeyFile() {
+    const auto path = getFilePath(KEY_FILE);
+    auto content = file::readString(path);
+    if (content == nullptr) {
+        file::findOrCreateDirectory(getStoragePath(), 0777);
+        file::writeString(path, "");
+        return "";
+    }
+    std::string text = skipBom(reinterpret_cast<const char*>(content.get()));
+    const auto lineEnd = text.find_first_of("\r\n");
+    return trimKey(lineEnd == std::string::npos ? text : text.substr(0, lineEnd));
 }
 
 static bool writeJson(const char* fileName, cJSON* json) {
@@ -65,7 +97,15 @@ static std::string getString(const cJSON* object, const char* key, const std::st
 
 Config loadConfig() {
     Config config;
+    config.apiKey = readKeyFile();
+    const bool exists = file::isFile(getFilePath(CONFIG_FILE));
     cJSON* json = readJson(CONFIG_FILE);
+    if (json == nullptr && exists) {
+        // Never overwrite a file the person edited, it may hold their key
+        LOG_E(TAG, "config.json is not valid JSON");
+        config.problem = "El archivo config.json tiene un error de formato. Revise las comillas y las comas, o borre el archivo para crearlo de nuevo.";
+        return config;
+    }
     if (json == nullptr) {
         cJSON* created = cJSON_CreateObject();
         cJSON_AddStringToObject(created, "api_key", "");
@@ -78,7 +118,9 @@ Config loadConfig() {
         cJSON_Delete(created);
         return config;
     }
-    config.apiKey = getString(json, "api_key");
+    if (config.apiKey.empty()) {
+        config.apiKey = trimKey(getString(json, "api_key"));
+    }
     config.model = getString(json, "modelo", config.model);
     config.thinkingLevel = getString(json, "razonamiento", config.thinkingLevel);
     config.ttsModel = getString(json, "modelo_voz", config.ttsModel);

@@ -14,6 +14,8 @@ struct Config {
     std::string ttsModel = "gemini-3.8-flash-tts";
     std::string voice = "Kore";
     std::string userName;
+    /** Empty, or what's wrong with the configuration files */
+    std::string problem;
 };
 
 struct Reminder {
@@ -57,7 +59,10 @@ bool isFormComplete(const HourRequest& form);
 
 std::string getStoragePath();
 
-/** Creates config.json with an empty API key when it doesn't exist, so it can be edited on the SD card */
+/**
+ * Reads the API key from clave_gemini.txt, or else from config.json.
+ * Creates both files when they don't exist, so they can be edited on the SD card.
+ */
 Config loadConfig();
 
 /** Falls back to the sample reminders when none are stored */
