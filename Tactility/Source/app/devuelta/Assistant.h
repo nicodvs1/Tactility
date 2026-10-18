@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -73,7 +74,13 @@ struct Reply {
  */
 std::string ask(const PromptContext& context, const std::vector<Turn>& history, const Pcm* audio, const std::string& text, Reply& reply);
 
-/** @return empty on success, or a message for the user */
-std::string synthesize(const Config& config, const std::string& text, Pcm& speech);
+/** Receives mono 16-bit samples, returns false to stop */
+using AudioSink = std::function<bool(const int16_t* samples, size_t count, uint32_t sampleRate)>;
+
+/**
+ * Generates the speech and hands it over piece by piece while it arrives.
+ * @return empty on success or when onAudio stopped it, or a message for the user
+ */
+std::string synthesizeStreaming(const Config& config, const std::string& text, const AudioSink& onAudio);
 
 }

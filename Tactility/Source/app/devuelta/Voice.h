@@ -2,6 +2,7 @@
 
 #include "Assistant.h"
 
+#include <cstdint>
 #include <functional>
 
 struct Device;
@@ -32,6 +33,38 @@ enum class PlayResult {
 };
 
 PlayResult play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopRequested);
+
+/**
+ * Plays audio that arrives in pieces. A task of its own feeds the speaker, so the caller can keep reading from the network.
+ * write() and finish() poll isStopRequested on the caller's task.
+ */
+class StreamPlayer {
+    struct State;
+    State* state;
+
+    static void run(void* parameter);
+
+public:
+    StreamPlayer(Device* stream, std::function<bool()> isStopRequested);
+    ~StreamPlayer();
+    StreamPlayer(const StreamPlayer&) = delete;
+    StreamPlayer& operator=(const StreamPlayer&) = delete;
+
+    /**
+     * Queues mono 16-bit samples, waiting while the queue is full. The first call sets the sample rate.
+     * @return false when playback stopped or failed
+     */
+    bool write(const int16_t* samples, size_t count, uint32_t sampleRate);
+
+    /** Plays what's queued and waits for it, or stops when requested */
+    PlayResult finish();
+
+    /** Drops what's queued and stops right away */
+    void stop();
+
+    bool hasAudio() const;
+    bool isStopRequested() const;
+};
 
 enum class Tone {
     /** Starts listening */

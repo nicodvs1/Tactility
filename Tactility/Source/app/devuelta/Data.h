@@ -10,7 +10,7 @@ constexpr auto* APP_ID = "cl.devuelta";
 struct Config {
     std::string apiKey;
     std::string model = "gemini-3.8-flash";
-    std::string thinkingLevel = "minimal";
+    std::string thinkingLevel = "low";
     std::string ttsModel = "gemini-3.8-flash-tts";
     std::string voice = "Kore";
     std::string userName;

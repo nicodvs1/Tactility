@@ -842,24 +842,35 @@ enum class SpeakResult {
 
 /** @param[out] error why the speech failed */
 SpeakResult speak(Context* ctx, Button& button, const std::string& text, std::string& error) {
-    Pcm speech;
-    error = synthesize(ctx->config, text, speech);
-    if (!error.empty()) {
-        LOG_W(TAG, "Speech failed: %s", error.c_str());
-        return SpeakResult::Failed;
-    }
     ctx->stopRequested = false;
-    const auto result = play(ctx->stream, speech, [ctx, &button] {
+    StreamPlayer player(ctx->stream, [ctx, &button] {
         pollStop(ctx, button);
         drainStopCommands(ctx);
         return ctx->stopRequested || !ctx->running;
     });
+    error = synthesizeStreaming(ctx->config, text, [&player](const int16_t* samples, size_t count, uint32_t sampleRate) {
+        return player.write(samples, count, sampleRate);
+    });
+    if (player.isStopRequested()) {
+        player.stop();
+        return ctx->running ? SpeakResult::Interrupted : SpeakResult::Completed;
+    }
+    if (!error.empty() && !player.hasAudio()) {
+        LOG_W(TAG, "Speech failed: %s", error.c_str());
+        player.stop();
+        return SpeakResult::Failed;
+    }
+    // Plays the rest, also when the speech broke off halfway
+    const auto result = player.finish();
+    if (result == PlayResult::Interrupted) {
+        return ctx->running ? SpeakResult::Interrupted : SpeakResult::Completed;
+    }
     if (result == PlayResult::Failed) {
         error = "No pude usar el parlante.";
         appendLog("Parlante: falló la reproducción");
         return SpeakResult::Failed;
     }
-    return result == PlayResult::Interrupted && ctx->running ? SpeakResult::Interrupted : SpeakResult::Completed;
+    return error.empty() ? SpeakResult::Completed : SpeakResult::Failed;
 }
 
 /**

@@ -7,8 +7,17 @@
 #include <cmath>
 #include <cstring>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/stream_buffer.h>
+#include <freertos/task.h>
+
+#include <atomic>
+
 #ifdef ESP_PLATFORM
 #include <driver/gpio.h>
+#include <esp_heap_caps.h>
+#include <freertos/idf_additions.h>
 #include <sdkconfig.h>
 #endif
 
@@ -233,6 +242,185 @@ PlayResult play(Device* stream, const Pcm& audio, const std::function<bool()>& i
     audio_stream_close(handle);
     return result;
 }
+
+// region Stream player
+
+/** Seconds of speech the queue holds while the network is faster than the speaker */
+constexpr size_t STREAM_QUEUE_SECONDS = 8;
+/** Played once this much audio is queued, so short network hiccups don't cut the speech */
+constexpr uint32_t STREAM_PREBUFFER_MILLIS = 300;
+constexpr size_t STREAM_CHUNK_SAMPLES = 512;
+constexpr uint32_t STREAM_TASK_STACK = 6144;
+
+struct StreamPlayer::State {
+    Device* stream = nullptr;
+    std::function<bool()> isStopRequested;
+    StreamBufferHandle_t queue = nullptr;
+    SemaphoreHandle_t done = nullptr;
+    TaskHandle_t task = nullptr;
+    std::atomic<uint32_t> sampleRate = 0;
+    std::atomic<bool> finishing = false;
+    std::atomic<bool> stopping = false;
+    std::atomic<bool> stopRequested = false;
+    std::atomic<bool> receivedAudio = false;
+    PlayResult result = PlayResult::Completed;
+};
+
+void StreamPlayer::run(void* parameter) {
+    auto* state = static_cast<State*>(parameter);
+    // Waits for the first audio, and then for a small reserve
+    while (!state->stopping && !state->finishing) {
+        const uint32_t rate = state->sampleRate;
+        if (rate != 0 && xStreamBufferBytesAvailable(state->queue) >= rate * sizeof(int16_t) * STREAM_PREBUFFER_MILLIS / 1000) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    if (!state->stopping && state->sampleRate != 0) {
+        const uint32_t rate = state->sampleRate;
+        const AudioStreamConfig config { rate, 16, 1 };
+        AudioStreamHandle handle = nullptr;
+        if (audio_stream_open_output(state->stream, &config, &handle) != ERROR_NONE) {
+            LOG_E(TAG, "Failed to open the speaker at %u Hz", static_cast<unsigned>(rate));
+            state->result = PlayResult::Failed;
+        } else {
+            writeSilence(handle, rate, PADDING_MILLIS);
+            setAmpEnabled(true);
+            writeSilence(handle, rate, PADDING_MILLIS);
+            int16_t chunk[STREAM_CHUNK_SAMPLES];
+            size_t played = 0;
+            const size_t fadeSamples = rate / 200;
+            while (true) {
+                if (state->stopping) {
+                    state->result = PlayResult::Interrupted;
+                    break;
+                }
+                const size_t bytes = xStreamBufferReceive(state->queue, chunk, sizeof(chunk), pdMS_TO_TICKS(20));
+                if (bytes == 0) {
+                    if (state->finishing && xStreamBufferIsEmpty(state->queue)) {
+                        break;
+                    }
+                    continue;
+                }
+                const size_t count = bytes / sizeof(int16_t);
+                for (size_t i = 0; i < count && played + i < fadeSamples; i++) {
+                    chunk[i] = static_cast<int16_t>(chunk[i] * (played + i) / fadeSamples);
+                }
+                played += count;
+                size_t written = 0;
+                if (audio_stream_write(handle, chunk, count * sizeof(int16_t), &written, pdMS_TO_TICKS(1000)) != ERROR_NONE) {
+                    LOG_E(TAG, "Failed to write to the speaker");
+                    state->result = PlayResult::Failed;
+                    break;
+                }
+            }
+            writeSilence(handle, rate, PADDING_MILLIS * 2);
+            setAmpEnabled(false);
+            writeSilence(handle, rate, PADDING_MILLIS);
+            audio_stream_close(handle);
+        }
+    } else if (state->stopping) {
+        state->result = PlayResult::Interrupted;
+    }
+    state->stopping = true;
+    xSemaphoreGive(state->done);
+    vTaskDelete(nullptr);
+}
+
+StreamPlayer::StreamPlayer(Device* stream, std::function<bool()> isStopRequested) : state(new State()) {
+    state->stream = stream;
+    state->isStopRequested = std::move(isStopRequested);
+    // 24 kHz is the rate of the Gemini speech
+    constexpr size_t queueSize = STREAM_QUEUE_SECONDS * 24000 * sizeof(int16_t);
+#ifdef ESP_PLATFORM
+    state->queue = xStreamBufferCreateWithCaps(queueSize, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    state->queue = xStreamBufferCreate(queueSize, 1);
+#endif
+    state->done = xSemaphoreCreateBinary();
+    if (state->queue == nullptr || state->done == nullptr ||
+        xTaskCreate(run, "devuelta_play", STREAM_TASK_STACK, state, 6, &state->task) != pdPASS) {
+        LOG_E(TAG, "Failed to start the stream player");
+        state->task = nullptr;
+        state->result = PlayResult::Failed;
+        state->stopping = true;
+    }
+}
+
+StreamPlayer::~StreamPlayer() {
+    if (state->task != nullptr) {
+        state->stopping = true;
+        xSemaphoreTake(state->done, portMAX_DELAY);
+    }
+    if (state->queue != nullptr) {
+#ifdef ESP_PLATFORM
+        vStreamBufferDeleteWithCaps(state->queue);
+#else
+        vStreamBufferDelete(state->queue);
+#endif
+    }
+    if (state->done != nullptr) {
+        vSemaphoreDelete(state->done);
+    }
+    delete state;
+}
+
+bool StreamPlayer::isStopRequested() const {
+    return state->stopRequested;
+}
+
+bool StreamPlayer::hasAudio() const {
+    return state->receivedAudio;
+}
+
+bool StreamPlayer::write(const int16_t* samples, size_t count, uint32_t sampleRate) {
+    if (state->sampleRate == 0) {
+        state->sampleRate = sampleRate;
+    }
+    state->receivedAudio = true;
+    const auto* bytes = reinterpret_cast<const uint8_t*>(samples);
+    size_t remaining = count * sizeof(int16_t);
+    while (remaining > 0) {
+        if (state->stopping) {
+            return false;
+        }
+        if (state->isStopRequested()) {
+            state->stopRequested = true;
+            return false;
+        }
+        const size_t sent = xStreamBufferSend(state->queue, bytes, remaining, pdMS_TO_TICKS(50));
+        bytes += sent;
+        remaining -= sent;
+    }
+    return true;
+}
+
+PlayResult StreamPlayer::finish() {
+    if (state->task == nullptr) {
+        return state->result;
+    }
+    state->finishing = true;
+    while (xSemaphoreTake(state->done, pdMS_TO_TICKS(20)) != pdTRUE) {
+        if (!state->stopping && state->isStopRequested()) {
+            state->stopRequested = true;
+            state->stopping = true;
+        }
+    }
+    state->task = nullptr;
+    return state->result;
+}
+
+void StreamPlayer::stop() {
+    if (state->task == nullptr) {
+        return;
+    }
+    state->stopping = true;
+    xSemaphoreTake(state->done, portMAX_DELAY);
+    state->task = nullptr;
+}
+
+// endregion
 
 struct Note {
     float frequency;

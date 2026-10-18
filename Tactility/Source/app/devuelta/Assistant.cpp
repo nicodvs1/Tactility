@@ -222,7 +222,12 @@ static esp_err_t attachTrust(void* configuration) {
 
 // endregion
 
-static int postOnce(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, Buffer& response, std::string& failure) {
+/**
+ * Sends the request and reads the response headers.
+ * @param[out] failure where the request stopped, when it returns nullptr
+ * @return the client, ready to read the body, or nullptr
+ */
+static esp_http_client_handle_t startPost(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, int64_t& contentLength, std::string& failure) {
     esp_http_client_config_t config {};
     config.url = url.c_str();
     config.method = HTTP_METHOD_POST;
@@ -235,7 +240,7 @@ static int postOnce(const std::string& url, const std::string& apiKey, const std
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == nullptr) {
         failure = "init";
-        return -1;
+        return nullptr;
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_header(client, "x-goog-api-key", apiKey.c_str());
@@ -245,7 +250,6 @@ static int postOnce(const std::string& url, const std::string& apiKey, const std
         total += part.size;
     }
 
-    int status = -1;
     auto& trust = getTrust();
     trust.chain.clear();
     const esp_err_t openResult = esp_http_client_open(client, static_cast<int>(total));
@@ -262,55 +266,73 @@ static int postOnce(const std::string& url, const std::string& apiKey, const std
         if (!trust.chain.empty()) {
             appendLog("Cadena de certificados rechazada:\n" + trust.chain);
         }
-    } else {
-        bool written = true;
-        for (const auto& part : parts) {
-            size_t offset = 0;
-            while (written && offset < part.size) {
-                const int chunk = std::min<size_t>(part.size - offset, 4096);
-                const int result = esp_http_client_write(client, part.data + offset, chunk);
-                if (result <= 0) {
-                    failure = std::format("write {}", result);
-                    written = false;
-                } else {
-                    offset += result;
-                }
-            }
-        }
-
-        const int64_t contentLength = written ? esp_http_client_fetch_headers(client) : -1;
-        if (written && (contentLength >= 0 || esp_http_client_is_chunked_response(client))) {
-            response.clear();
-            response.reserve(contentLength > 0 ? contentLength + 1 : 65536);
-            uint8_t chunk[2048];
-            int count;
-            bool complete = true;
-            while ((count = esp_http_client_read(client, reinterpret_cast<char*>(chunk), sizeof(chunk))) > 0) {
-                if (!response.append(chunk, count)) {
-                    failure = "memoria";
-                    complete = false;
-                    break;
-                }
-            }
-            if (complete && (count < 0 || !esp_http_client_is_complete_data_received(client))) {
-                failure = count == -ESP_ERR_HTTP_EAGAIN ? "tiempo" : std::format("read {}, {} of {} bytes", count, response.size(), contentLength);
-                complete = false;
-            }
-            const uint8_t terminator = 0;
-            if (complete && !response.append(&terminator, 1)) {
-                failure = "memoria";
-                complete = false;
-            }
-            if (complete) {
-                response.setSize(response.size() - 1);
-                status = esp_http_client_get_status_code(client);
-            }
-        } else if (written) {
-            failure = contentLength == -ESP_ERR_HTTP_EAGAIN ? "tiempo" : std::format("headers {}", contentLength);
-        }
-        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return nullptr;
     }
+
+    for (const auto& part : parts) {
+        size_t offset = 0;
+        while (offset < part.size) {
+            const int chunk = std::min<size_t>(part.size - offset, 4096);
+            const int result = esp_http_client_write(client, part.data + offset, chunk);
+            if (result <= 0) {
+                failure = std::format("write {}", result);
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                return nullptr;
+            }
+            offset += result;
+        }
+    }
+
+    contentLength = esp_http_client_fetch_headers(client);
+    if (contentLength < 0 && !esp_http_client_is_chunked_response(client)) {
+        failure = contentLength == -ESP_ERR_HTTP_EAGAIN ? "tiempo" : std::format("headers {}", contentLength);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return nullptr;
+    }
+    return client;
+}
+
+static void endPost(esp_http_client_handle_t client) {
+    esp_http_client_close(client);
     esp_http_client_cleanup(client);
+}
+
+/** Reads the whole body. @return the HTTP status, or -1 when the body didn't arrive completely */
+static int readBody(esp_http_client_handle_t client, int64_t contentLength, Buffer& response, std::string& failure) {
+    response.clear();
+    response.reserve(contentLength > 0 ? contentLength + 1 : 65536);
+    uint8_t chunk[2048];
+    int count;
+    while ((count = esp_http_client_read(client, reinterpret_cast<char*>(chunk), sizeof(chunk))) > 0) {
+        if (!response.append(chunk, count)) {
+            failure = "memoria";
+            return -1;
+        }
+    }
+    if (count < 0 || !esp_http_client_is_complete_data_received(client)) {
+        failure = count == -ESP_ERR_HTTP_EAGAIN ? "tiempo" : std::format("read {}, {} of {} bytes", count, response.size(), contentLength);
+        return -1;
+    }
+    const uint8_t terminator = 0;
+    if (!response.append(&terminator, 1)) {
+        failure = "memoria";
+        return -1;
+    }
+    response.setSize(response.size() - 1);
+    return esp_http_client_get_status_code(client);
+}
+
+static int postOnce(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, Buffer& response, std::string& failure) {
+    int64_t contentLength = 0;
+    esp_http_client_handle_t client = startPost(url, apiKey, parts, contentLength, failure);
+    if (client == nullptr) {
+        return -1;
+    }
+    const int status = readBody(client, contentLength, response, failure);
+    endPost(client);
     return status;
 }
 
@@ -601,6 +623,22 @@ static bool encodeBase64(const Buffer& input, Buffer& output) {
 
 // region Ask
 
+/** The thinking level that the model accepted, so a rejected one isn't sent again */
+struct ThinkingMemory {
+    std::string model;
+    std::string configured;
+    std::string accepted;
+};
+
+static ThinkingMemory& getThinkingMemory() {
+    static ThinkingMemory* memory = [] {
+        auto* created = tt::newObject<ThinkingMemory>();
+        check(created != nullptr);
+        return created;
+    }();
+    return *memory;
+}
+
 static std::string getString(const cJSON* object, const char* key) {
     const cJSON* item = cJSON_GetObjectItemCaseSensitive(object, key);
     return cJSON_IsString(item) && item->valuestring != nullptr ? item->valuestring : "";
@@ -675,14 +713,17 @@ std::string ask(const PromptContext& context, const std::vector<Turn>& history, 
     std::string failure;
     int status = -1;
     // A model that rejects the configured thinking level is retried with "low", and then with its default
-    std::vector<std::string> thinkingLevels { context.config->thinkingLevel };
+    auto& memory = getThinkingMemory();
+    const bool remembered = memory.model == context.config->model && memory.configured == context.config->thinkingLevel;
+    std::vector<std::string> thinkingLevels { remembered ? memory.accepted : context.config->thinkingLevel };
     for (const char* fallback : { "low", "" }) {
         if (std::find(thinkingLevels.begin(), thinkingLevels.end(), fallback) == thinkingLevels.end()) {
             thinkingLevels.push_back(fallback);
         }
     }
     const TickType_t start = xTaskGetTickCount();
-    for (size_t attempt = 0; attempt < thinkingLevels.size(); attempt++) {
+    size_t attempt = 0;
+    for (; attempt < thinkingLevels.size(); attempt++) {
         cJSON* request = createAskRequest(context, history, audio != nullptr, text, thinkingLevels[attempt]);
         char* json = cJSON_PrintUnformatted(request);
         cJSON_Delete(request);
@@ -713,6 +754,7 @@ std::string ask(const PromptContext& context, const std::vector<Turn>& history, 
     if (status != 200) {
         return describeHttpError("Pregunta", status, response, failure);
     }
+    memory = { context.config->model, context.config->thinkingLevel, thinkingLevels[attempt] };
 
     cJSON* json = cJSON_Parse(reinterpret_cast<const char*>(response.data()));
     const auto answerText = getAnswerText(json);
@@ -731,92 +773,11 @@ std::string ask(const PromptContext& context, const std::vector<Turn>& history, 
 
 // region Speech
 
-static uint32_t readLittleEndian16(const uint8_t* bytes) {
-    return bytes[0] | (bytes[1] << 8);
-}
-
-static uint32_t readLittleEndian32(const uint8_t* bytes) {
-    return bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (static_cast<uint32_t>(bytes[3]) << 24);
-}
-
-/** Appends 16-bit PCM, mixed down to mono */
-static bool appendSamples(Pcm& speech, const uint8_t* bytes, size_t size, uint32_t channels) {
-    if (channels <= 1) {
-        return speech.samples.append(bytes, size & ~static_cast<size_t>(1));
-    }
-    const size_t frameSize = channels * sizeof(int16_t);
-    if (!speech.samples.reserve(speech.samples.size() + size / channels)) {
-        return false;
-    }
-    for (size_t offset = 0; offset + frameSize <= size; offset += frameSize) {
-        int32_t sum = 0;
-        for (uint32_t channel = 0; channel < channels; channel++) {
-            sum += static_cast<int16_t>(readLittleEndian16(bytes + offset + channel * sizeof(int16_t)));
-        }
-        const auto sample = static_cast<int16_t>(sum / static_cast<int32_t>(channels));
-        speech.samples.append(&sample, sizeof(sample));
-    }
-    return true;
-}
-
-/**
- * Appends one decoded audio piece: a WAV file, or raw 16-bit little-endian PCM.
- * @return empty on success, or a message for the user
- */
-static std::string appendAudioPiece(Pcm& speech, const Buffer& decoded, uint32_t sampleRate, uint32_t channels) {
-    const uint8_t* bytes = decoded.data();
-    const size_t size = decoded.size();
-    if (size < 12 || memcmp(bytes, "RIFF", 4) != 0 || memcmp(bytes + 8, "WAVE", 4) != 0) {
-        speech.sampleRate = sampleRate;
-        return appendSamples(speech, bytes, size, channels) ? "" : "No hay memoria suficiente para el audio.";
-    }
-    size_t offset = 12;
-    while (offset + 8 <= size) {
-        const uint32_t chunkSize = readLittleEndian32(bytes + offset + 4);
-        const size_t remaining = size - offset - 8;
-        if (memcmp(bytes + offset, "fmt ", 4) == 0 && remaining >= 16) {
-            const uint32_t format = readLittleEndian16(bytes + offset + 8);
-            channels = readLittleEndian16(bytes + offset + 10);
-            sampleRate = readLittleEndian32(bytes + offset + 12);
-            const uint32_t bits = readLittleEndian16(bytes + offset + 22);
-            if (format != 1 || bits != 16 || channels == 0) {
-                LOG_E(TAG, "Unsupported WAV: format %u, %u bits, %u channels", static_cast<unsigned>(format), static_cast<unsigned>(bits), static_cast<unsigned>(channels));
-                return std::format("El audio llegó en un formato que no puedo reproducir ({} bits).", bits);
-            }
-        } else if (memcmp(bytes + offset, "data", 4) == 0) {
-            // Streaming encoders may leave the size at 0 or at the maximum
-            const size_t dataSize = chunkSize == 0 || chunkSize > remaining ? remaining : chunkSize;
-            speech.sampleRate = sampleRate;
-            return appendSamples(speech, bytes + offset + 8, dataSize, channels) ? "" : "No hay memoria suficiente para el audio.";
-        }
-        offset += 8 + chunkSize + (chunkSize & 1);
-    }
-    return "El audio llegó incompleto.";
-}
-
-/** Collects the objects that hold audio data anywhere in the response, in the order they were generated */
-static void findAudioItems(const cJSON* node, std::vector<const cJSON*>& items) {
-    if (cJSON_IsObject(node)) {
-        const bool isAudio = getString(node, "type") == "audio" || getString(node, "mime_type").starts_with("audio/") || getString(node, "mimeType").starts_with("audio/");
-        if (isAudio && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(node, "data"))) {
-            items.push_back(node);
-            return;
-        }
-    }
-    const cJSON* child;
-    cJSON_ArrayForEach(child, node) {
-        findAudioItems(child, items);
-    }
-}
-
-std::string synthesize(const Config& config, const std::string& text, Pcm& speech) {
-    if (config.apiKey.empty()) {
-        return "Falta la clave de Gemini.";
-    }
-
+static cJSON* createSpeechRequest(const Config& config, const std::string& text) {
     cJSON* request = cJSON_CreateObject();
     cJSON_AddStringToObject(request, "model", config.ttsModel.c_str());
     cJSON_AddBoolToObject(request, "store", false);
+    cJSON_AddBoolToObject(request, "stream", true);
     cJSON* input = cJSON_AddArrayToObject(request, "input");
     cJSON* textInput = cJSON_CreateObject();
     cJSON_AddStringToObject(textInput, "type", "text");
@@ -829,77 +790,197 @@ std::string synthesize(const Config& config, const std::string& text, Pcm& speec
     cJSON_AddItemToArray(input, textInput);
     const char* modalities[] = { "audio" };
     cJSON_AddItemToObject(request, "response_modalities", cJSON_CreateStringArray(modalities, 1));
+    // Raw 16-bit little-endian PCM, so every streamed piece can be played as it arrives
     cJSON* format = cJSON_AddObjectToObject(request, "response_format");
     cJSON_AddStringToObject(format, "type", "audio");
-    cJSON_AddStringToObject(format, "mime_type", "audio/wav");
-    cJSON_AddNumberToObject(format, "sample_rate", 16000);
+    cJSON_AddStringToObject(format, "mime_type", "audio/l16");
     cJSON* generation = cJSON_AddObjectToObject(request, "generation_config");
     cJSON* speechConfigs = cJSON_AddArrayToObject(generation, "speech_config");
     cJSON* speechConfig = cJSON_CreateObject();
     cJSON_AddStringToObject(speechConfig, "voice", config.voice.c_str());
     cJSON_AddItemToArray(speechConfigs, speechConfig);
+    return request;
+}
 
+/** Reads the server-sent events of the speech stream and hands over the audio of each one */
+class SpeechStream {
+    const AudioSink& onAudio;
+    Buffer line;
+    Buffer decoded;
+
+public:
+    uint32_t sampleRate = 24000;
+    size_t sampleCount = 0;
+    TickType_t firstAudio = 0;
+    bool done = false;
+    bool stopped = false;
+    /** A message for the user */
+    std::string error;
+
+    explicit SpeechStream(const AudioSink& onAudio) : onAudio(onAudio) {}
+
+    bool isOpen() const { return !done && !stopped && error.empty(); }
+
+    void feed(const uint8_t* data, size_t size) {
+        size_t offset = 0;
+        while (offset < size && isOpen()) {
+            const auto* newline = static_cast<const uint8_t*>(memchr(data + offset, '\n', size - offset));
+            const size_t end = newline != nullptr ? newline - data : size;
+            if (end > offset && !line.append(data + offset, end - offset)) {
+                error = "No hay memoria suficiente para la voz.";
+                return;
+            }
+            offset = end;
+            if (newline != nullptr) {
+                handleLine(reinterpret_cast<const char*>(line.data()), line.size());
+                line.clear();
+                offset++;
+            }
+        }
+    }
+
+private:
+    void handleLine(const char* text, size_t size) {
+        if (size > 0 && text[size - 1] == '\r') {
+            size--;
+        }
+        if (size < 5 || memcmp(text, "data:", 5) != 0) {
+            return;
+        }
+        text += 5;
+        size -= 5;
+        while (size > 0 && *text == ' ') {
+            text++;
+            size--;
+        }
+        if (size == 6 && memcmp(text, "[DONE]", 6) == 0) {
+            done = true;
+            return;
+        }
+        cJSON* event = cJSON_ParseWithLength(text, size);
+        if (event == nullptr) {
+            return;
+        }
+        const cJSON* delta = cJSON_GetObjectItemCaseSensitive(event, "delta");
+        const cJSON* audio = cJSON_GetObjectItemCaseSensitive(delta, "data");
+        const cJSON* problem = cJSON_GetObjectItemCaseSensitive(event, "error");
+        if (cJSON_IsString(audio) && audio->valuestring != nullptr) {
+            handleAudio(delta, audio->valuestring);
+        } else if (problem != nullptr) {
+            const auto message = getString(problem, "message");
+            appendLog(std::format("Voz: error del servicio durante la voz: {}", message));
+            error = std::format("El servicio falló al generar la voz. ({})", message.empty() ? "sin detalle" : message);
+        }
+        cJSON_Delete(event);
+    }
+
+    void handleAudio(const cJSON* delta, const char* base64) {
+        const cJSON* rate = cJSON_GetObjectItemCaseSensitive(delta, "sample_rate");
+        if (cJSON_IsNumber(rate) && rate->valueint > 0) {
+            sampleRate = rate->valueint;
+        }
+        const auto* source = reinterpret_cast<const uint8_t*>(base64);
+        const size_t length = strlen(base64);
+        size_t needed = 0;
+        mbedtls_base64_decode(nullptr, 0, &needed, source, length);
+        decoded.clear();
+        size_t written = 0;
+        if (needed == 0 || !decoded.reserve(needed) || mbedtls_base64_decode(decoded.data(), decoded.getCapacity(), &written, source, length) != 0) {
+            error = "La voz llegó dañada.";
+            return;
+        }
+        const size_t count = written / sizeof(int16_t);
+        if (count == 0) {
+            return;
+        }
+        if (firstAudio == 0) {
+            firstAudio = xTaskGetTickCount();
+        }
+        sampleCount += count;
+        if (!onAudio(reinterpret_cast<const int16_t*>(decoded.data()), count, sampleRate)) {
+            stopped = true;
+        }
+    }
+};
+
+std::string synthesizeStreaming(const Config& config, const std::string& text, const AudioSink& onAudio) {
+    if (config.apiKey.empty()) {
+        return "Falta la clave de Gemini.";
+    }
+    cJSON* request = createSpeechRequest(config, text);
     char* json = cJSON_PrintUnformatted(request);
     cJSON_Delete(request);
     if (json == nullptr) {
         return "No hay memoria suficiente.";
     }
+
+    const auto url = std::format("{}/interactions", API_BASE);
+    const std::vector<Part> parts { { json, strlen(json) } };
     const TickType_t start = xTaskGetTickCount();
-    Buffer response;
     std::string failure;
-    const int status = post(std::format("{}/interactions", API_BASE), config.apiKey, { { json, strlen(json) } }, response, failure);
+    int64_t contentLength = 0;
+    int status = -1;
+    esp_http_client_handle_t client = nullptr;
+    // Retried once, like the other requests
+    for (int attempt = 0; attempt < 2; attempt++) {
+        failure.clear();
+        client = startPost(url, config.apiKey, parts, contentLength, failure);
+        status = client != nullptr ? esp_http_client_get_status_code(client) : -1;
+        const bool retry = (client == nullptr && failure.starts_with("open")) || isTransientStatus(status);
+        if (!retry || attempt == 1) {
+            break;
+        }
+        if (client != nullptr) {
+            endPost(client);
+            client = nullptr;
+        }
+        LOG_W(TAG, "Retrying speech after %d %s", status, failure.c_str());
+        appendLog(std::format("Reintento de voz tras {} {}", status, failure));
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
     cJSON_free(json);
+    if (client == nullptr) {
+        return describeHttpError("Voz", -1, Buffer(), failure);
+    }
     if (status != 200) {
+        Buffer response;
+        readBody(client, contentLength, response, failure);
+        endPost(client);
         return describeHttpError("Voz", status, response, failure);
     }
 
-    cJSON* parsed = cJSON_Parse(reinterpret_cast<const char*>(response.data()));
-    // The parsed copy holds the audio from here on
-    response = Buffer();
-    if (parsed == nullptr) {
-        appendLog("Voz: la respuesta no es JSON válido");
-        return "La voz llegó dañada.";
-    }
-    std::vector<const cJSON*> items;
-    findAudioItems(parsed, items);
-    speech.samples.clear();
-    std::string error = items.empty() ? "El servicio no devolvió audio." : "";
-    for (const cJSON* item : items) {
-        const cJSON* data = cJSON_GetObjectItemCaseSensitive(item, "data");
-        if (!cJSON_IsString(data) || data->valuestring == nullptr) {
-            continue;
-        }
-        const auto* base64 = reinterpret_cast<const uint8_t*>(data->valuestring);
-        const size_t length = strlen(data->valuestring);
-        size_t decodedSize = 0;
-        mbedtls_base64_decode(nullptr, 0, &decodedSize, base64, length);
-        Buffer decoded;
-        size_t written = 0;
-        if (!decoded.reserve(decodedSize + 1)) {
-            error = "No hay memoria suficiente para el audio.";
+    SpeechStream stream(onAudio);
+    uint8_t chunk[2048];
+    while (stream.isOpen()) {
+        const int count = esp_http_client_read(client, reinterpret_cast<char*>(chunk), sizeof(chunk));
+        if (count < 0) {
+            failure = count == -ESP_ERR_HTTP_EAGAIN ? "tiempo" : std::format("read {}", count);
             break;
         }
-        if (mbedtls_base64_decode(decoded.data(), decoded.getCapacity(), &written, base64, length) != 0) {
-            error = "La voz llegó dañada.";
+        if (count == 0) {
             break;
         }
-        decoded.setSize(written);
-        const cJSON* rate = cJSON_GetObjectItemCaseSensitive(item, "sample_rate");
-        const cJSON* channels = cJSON_GetObjectItemCaseSensitive(item, "channels");
-        error = appendAudioPiece(speech, decoded, cJSON_IsNumber(rate) && rate->valueint > 0 ? rate->valueint : 24000, cJSON_IsNumber(channels) && channels->valueint > 0 ? channels->valueint : 1);
-        if (!error.empty()) {
-            appendLog(std::format("Voz: pieza de audio {} ({})", error, getString(item, "mime_type")));
-            break;
-        }
+        stream.feed(chunk, count);
     }
-    cJSON_Delete(parsed);
-    if (error.empty() && speech.samples.size() == 0) {
-        error = "El servicio no devolvió audio.";
+    endPost(client);
+
+    if (stream.stopped) {
+        return "";
     }
-    if (!error.empty()) {
-        return error;
+    if (!stream.error.empty()) {
+        return stream.error;
     }
-    appendLog(std::format("Voz generada en {} ms, {} ms de audio a {} Hz", pdTICKS_TO_MS(xTaskGetTickCount() - start), speech.getSampleCount() * 1000 / speech.sampleRate, speech.sampleRate));
+    if (!failure.empty()) {
+        appendLog(std::format("Voz: se cortó, {}, {} ms de audio recibido", failure, stream.sampleCount * 1000 / stream.sampleRate));
+        return failure == "tiempo" ? "Gemini se demoró demasiado en generar la voz." : std::format("La voz se cortó. (Detalle: {})", failure);
+    }
+    if (stream.sampleCount == 0) {
+        appendLog("Voz: el servicio no devolvió audio");
+        return "El servicio no devolvió audio.";
+    }
+    appendLog(std::format("Voz: primer audio en {} ms, completa en {} ms, {} ms de audio a {} Hz{}",
+        pdTICKS_TO_MS(stream.firstAudio - start), pdTICKS_TO_MS(xTaskGetTickCount() - start),
+        stream.sampleCount * 1000 / stream.sampleRate, stream.sampleRate, stream.done ? "" : ", sin [DONE]"));
     return "";
 }
 
@@ -911,7 +992,7 @@ std::string ask(const PromptContext&, const std::vector<Turn>&, const Pcm*, cons
     return "No disponible en el simulador.";
 }
 
-std::string synthesize(const Config&, const std::string&, Pcm&) {
+std::string synthesizeStreaming(const Config&, const std::string&, const AudioSink&) {
     return "No disponible en el simulador.";
 }
 
