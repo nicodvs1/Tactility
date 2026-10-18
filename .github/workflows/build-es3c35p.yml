@@ -1,0 +1,21 @@
+name: Build ES3C35P
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  BuildFirmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: "Build Firmware"
+        uses: ./.github/actions/build-firmware
+        with:
+          board_id: es3c35p
+          arch: esp32s3

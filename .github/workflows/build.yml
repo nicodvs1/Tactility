@@ -1,8 +1,8 @@
 name: Build Firmware
 on:
+  # This fork builds only the ES3C35P on push (see build-es3c35p.yml)
+  workflow_dispatch:
   push:
-    branches:
-      - main
     tags:
       - v*
   pull_request:

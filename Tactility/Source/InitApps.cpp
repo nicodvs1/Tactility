@@ -102,6 +102,7 @@ namespace app {
 
 #if defined(CONFIG_SOC_WIFI_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLED)
     namespace chat { extern const ::AppManifest manifest; }
+    namespace devuelta { extern const ::AppManifest manifest; }
 #endif
 }
 
@@ -187,6 +188,9 @@ static void registerInternalApps() {
 
 #if defined(CONFIG_SOC_WIFI_SUPPORTED) || defined(CONFIG_ESP_HOSTED_ENABLED)
     app_manager_add(&app::chat::manifest);
+    if (service::audio::isAvailable()) {
+        app_manager_add(&app::devuelta::manifest);
+    }
 #endif
 
     if (device_exists_of_type(&GROVE_TYPE)) {

@@ -74,6 +74,7 @@ if (DEFINED ENV{ESP_IDF_VERSION})
         app-esp32-module
         platform-esp32
         driver
+        esp_driver_gpio
         QRCode
         esp_http_server
         esp_http_client
