@@ -170,12 +170,21 @@ constexpr char GOOGLE_ROOT_CERTIFICATES[] =
 
 // region Trust
 
+/** A certificate the server sent, as the verify callback saw it */
+struct ReceivedCertificate {
+    int depth;
+    uint32_t flags;
+    uint32_t flagsAfterBundle;
+    int bundleResult;
+    std::string der;
+};
+
 /** The roots above, with the certificate bundle of the firmware as a fallback */
 struct Trust {
     mbedtls_x509_crt roots;
     bool parsed = false;
-    /** The chain the server sent during the last handshake, for registro.txt */
-    std::string chain;
+    /** The chain the server sent during the last handshake, from the top down */
+    std::vector<ReceivedCertificate> chain;
     bool loggedWorkingChain = false;
 };
 
@@ -194,16 +203,16 @@ static Trust& getTrust() {
     return *trust;
 }
 
-/** Records each certificate of the chain, then lets the bundle accept what the Google roots didn't */
+/**
+ * Lets the bundle accept what the Google roots didn't, and records each certificate.
+ * A rejection keeps its flags, so the handshake still fails, but the rest of the chain gets recorded too.
+ */
 static int verifyCertificate(void*, mbedtls_x509_crt* certificate, int depth, uint32_t* flags) {
     auto& trust = getTrust();
     const uint32_t ownFlags = *flags;
     const int result = esp_crt_verify_callback(nullptr, certificate, depth, flags);
-    std::string info(600, '\0');
-    const int length = mbedtls_x509_crt_info(info.data(), info.size(), "    ", certificate);
-    info.resize(length > 0 ? length : 0);
-    trust.chain += std::format("  [{}] flags 0x{:X} -> 0x{:X}, resultado -0x{:X}\n{}", depth, ownFlags, *flags, -result, info);
-    return result;
+    trust.chain.push_back({ depth, ownFlags, *flags, result, std::string(reinterpret_cast<const char*>(certificate->raw.p), certificate->raw.len) });
+    return 0;
 }
 
 static esp_err_t attachTrust(void* configuration) {
@@ -218,6 +227,46 @@ static esp_err_t attachTrust(void* configuration) {
     }
     mbedtls_ssl_conf_verify(ssl, verifyCertificate, nullptr);
     return ESP_OK;
+}
+
+static bool parseCertificate(const ReceivedCertificate& received, mbedtls_x509_crt& certificate) {
+    mbedtls_x509_crt_init(&certificate);
+    return mbedtls_x509_crt_parse_der(&certificate, reinterpret_cast<const unsigned char*>(received.der.data()), received.der.size()) == 0;
+}
+
+/**
+ * Describes the recorded chain for registro.txt. Each certificate is checked against the Google roots alone,
+ * and against the certificate above it, to tell a missing root apart from a signature the device can't verify.
+ */
+static std::string describeChain() {
+    const auto& trust = getTrust();
+    std::string text;
+    std::string info(2048, '\0');
+    for (size_t i = 0; i < trust.chain.size(); i++) {
+        const auto& received = trust.chain[i];
+        mbedtls_x509_crt certificate;
+        if (!parseCertificate(received, certificate)) {
+            text += std::format("  [{}] no se pudo leer\n", received.depth);
+            mbedtls_x509_crt_free(&certificate);
+            continue;
+        }
+        uint32_t rootFlags = 0;
+        const int rootResult = trust.parsed ? mbedtls_x509_crt_verify(&certificate, const_cast<mbedtls_x509_crt*>(&trust.roots), nullptr, nullptr, &rootFlags, nullptr, nullptr) : -1;
+        std::string parentCheck = "sin certificado arriba";
+        mbedtls_x509_crt parent;
+        if (i > 0 && parseCertificate(trust.chain[i - 1], parent)) {
+            uint32_t parentFlags = 0;
+            const int parentResult = mbedtls_x509_crt_verify(&certificate, &parent, nullptr, nullptr, &parentFlags, nullptr, nullptr);
+            parentCheck = std::format("contra el de arriba -0x{:X} flags 0x{:X}", -parentResult, parentFlags);
+            mbedtls_x509_crt_free(&parent);
+        }
+        const int length = mbedtls_x509_crt_info(info.data(), info.size(), "    ", &certificate);
+        text += std::format("  [{}] flags 0x{:X} -> 0x{:X}, bundle -0x{:X}; contra raices Google -0x{:X} flags 0x{:X}; {}\n{}\n",
+            received.depth, received.flags, received.flagsAfterBundle, -received.bundleResult, -rootResult, rootFlags, parentCheck,
+            length > 0 ? info.substr(0, length) : std::format("    (sin detalle -0x{:X})", -length));
+        mbedtls_x509_crt_free(&certificate);
+    }
+    return text;
 }
 
 // endregion
@@ -255,7 +304,7 @@ static esp_http_client_handle_t startPost(const std::string& url, const std::str
     const esp_err_t openResult = esp_http_client_open(client, static_cast<int>(total));
     if (openResult == ESP_OK && !trust.loggedWorkingChain && !trust.chain.empty()) {
         trust.loggedWorkingChain = true;
-        appendLog("Cadena de certificados que funcionó:\n" + trust.chain);
+        appendLog("Cadena de certificados que funcionó:\n" + describeChain());
     }
     if (openResult != ESP_OK) {
         int tlsCode = 0;
@@ -264,7 +313,7 @@ static esp_http_client_handle_t startPost(const std::string& url, const std::str
         failure = std::format("open {}, {} -0x{:X} {:X}, ram {}k/{}k", esp_err_to_name(openResult), esp_err_to_name(tlsError), -tlsCode, tlsFlags,
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
         if (!trust.chain.empty()) {
-            appendLog("Cadena de certificados rechazada:\n" + trust.chain);
+            appendLog("Cadena de certificados rechazada:\n" + describeChain());
         }
         esp_http_client_cleanup(client);
         return nullptr;
