@@ -24,8 +24,14 @@ enum class RecordResult {
  */
 RecordResult record(Device* stream, Pcm& audio, const std::function<void(float)>& onLevel, const std::function<bool()>& isStopRequested);
 
-/** @return false when interrupted or failed */
-bool play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopRequested);
+enum class PlayResult {
+    Completed,
+    /** Stopped by isStopRequested */
+    Interrupted,
+    Failed,
+};
+
+PlayResult play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopRequested);
 
 enum class Tone {
     /** Starts listening */

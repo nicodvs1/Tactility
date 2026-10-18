@@ -8,9 +8,13 @@
 
 #include <cJSON.h>
 
+#include <sys/stat.h>
+
 #include <cctype>
 #include <cstring>
+#include <ctime>
 #include <format>
+#include <fstream>
 #include <map>
 
 namespace tt::app::devuelta {
@@ -21,6 +25,8 @@ constexpr auto* CONFIG_FILE = "config.json";
 constexpr auto* KEY_FILE = "clave_gemini.txt";
 constexpr auto* REMINDERS_FILE = "recordatorios.json";
 constexpr auto* FORM_FILE = "ficha_hora.json";
+constexpr auto* LOG_FILE = "registro.txt";
+constexpr size_t MAX_LOG_SIZE = 64 * 1024;
 
 bool isFormComplete(const HourRequest& form) {
     for (const auto& field : FORM_FIELDS) {
@@ -218,6 +224,23 @@ void enableAutoStart() {
     if (!file::savePropertiesFile(path, properties)) {
         LOG_W(TAG, "Failed to enable auto start");
     }
+}
+
+void appendLog(const std::string& line) {
+    const auto path = getFilePath(LOG_FILE);
+    struct stat fileStat {};
+    const bool full = stat(path.c_str(), &fileStat) == 0 && static_cast<size_t>(fileStat.st_size) > MAX_LOG_SIZE;
+    if (!file::findOrCreateDirectory(getStoragePath(), 0777)) {
+        return;
+    }
+    std::ofstream stream(path, full ? std::ios::trunc : std::ios::app);
+    if (!stream.is_open()) {
+        return;
+    }
+    const time_t now = time(nullptr);
+    tm local {};
+    localtime_r(&now, &local);
+    stream << std::format("{:04}-{:02}-{:02} {:02}:{:02}:{:02} {}\n", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec, line);
 }
 
 }

@@ -27,6 +27,8 @@ constexpr float MIN_SPEECH_RMS = 120.0f;
 constexpr float SPEECH_FACTOR = 2.0f;
 /** Below the speech threshold, but enough to send the audio anyway when nothing clearer was heard */
 constexpr float SOFT_SPEECH_FACTOR = 1.5f;
+/** Frames this quiet are digital silence from the codec starting up, not room noise */
+constexpr float DIGITAL_SILENCE_RMS = 2.0f;
 constexpr float NORMALIZED_PEAK = 22000.0f;
 constexpr float MAX_GAIN = 8.0f;
 constexpr size_t PLAY_CHUNK_SAMPLES = 1024;
@@ -102,7 +104,9 @@ RecordResult record(Device* stream, Pcm& audio, const std::function<void(float)>
         audio.samples.append(frame, count * sizeof(int16_t));
 
         const float rms = getRms(frame, count);
-        noiseFloor = std::min(noiseFloor, rms);
+        if (rms > DIGITAL_SILENCE_RMS) {
+            noiseFloor = std::min(noiseFloor, rms);
+        }
         onLevel(std::min(1.0f, rms / std::max(noiseFloor * 8.0f, 1000.0f)));
 
         if (index < CALIBRATION_FRAMES) {
@@ -110,7 +114,8 @@ RecordResult record(Device* stream, Pcm& audio, const std::function<void(float)>
         }
         peak = std::max(peak, rms);
 
-        const float threshold = std::max(noiseFloor * SPEECH_FACTOR, MIN_SPEECH_RMS);
+        const float floor = noiseFloor < 1e8f ? noiseFloor : 0.0f;
+        const float threshold = std::max(floor * SPEECH_FACTOR, MIN_SPEECH_RMS);
         if (rms > threshold) {
             loudFrames++;
             quietFrames = 0;
@@ -126,12 +131,12 @@ RecordResult record(Device* stream, Pcm& audio, const std::function<void(float)>
             break;
         }
         if (!speaking && index >= NO_SPEECH_TIMEOUT_FRAMES) {
-            const bool heardSomething = peak > noiseFloor * SOFT_SPEECH_FACTOR && peak > MIN_SPEECH_RMS / 2;
+            const bool heardSomething = peak > floor * SOFT_SPEECH_FACTOR && peak > MIN_SPEECH_RMS / 2;
             result = heardSomething ? RecordResult::Spoken : RecordResult::Silence;
             break;
         }
         if (isStopRequested()) {
-            result = speaking || peak > noiseFloor * SOFT_SPEECH_FACTOR ? RecordResult::Spoken : RecordResult::Cancelled;
+            result = speaking || peak > floor * SOFT_SPEECH_FACTOR ? RecordResult::Spoken : RecordResult::Cancelled;
             break;
         }
     }
@@ -187,12 +192,12 @@ static bool writeSilence(AudioStreamHandle handle, uint32_t sampleRate, uint32_t
     return true;
 }
 
-bool play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopRequested) {
+PlayResult play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopRequested) {
     const AudioStreamConfig config { audio.sampleRate, 16, 1 };
     AudioStreamHandle handle = nullptr;
     if (audio_stream_open_output(stream, &config, &handle) != ERROR_NONE) {
-        LOG_E(TAG, "Failed to open the speaker");
-        return false;
+        LOG_E(TAG, "Failed to open the speaker at %u Hz", static_cast<unsigned>(audio.sampleRate));
+        return PlayResult::Failed;
     }
 
     // The amplifier turns on after the codec settled on silence, which avoids the pop
@@ -200,13 +205,13 @@ bool play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopR
     setAmpEnabled(true);
     writeSilence(handle, audio.sampleRate, PADDING_MILLIS);
 
-    bool completed = true;
+    auto result = PlayResult::Completed;
     const int16_t* samples = audio.getSamples();
     const size_t total = audio.getSampleCount();
     int16_t chunk[PLAY_CHUNK_SAMPLES];
     for (size_t offset = 0; offset < total; offset += PLAY_CHUNK_SAMPLES) {
         if (isStopRequested()) {
-            completed = false;
+            result = PlayResult::Interrupted;
             break;
         }
         const size_t count = std::min(PLAY_CHUNK_SAMPLES, total - offset);
@@ -216,7 +221,8 @@ bool play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopR
         }
         size_t bytesWritten = 0;
         if (audio_stream_write(handle, chunk, count * sizeof(int16_t), &bytesWritten, pdMS_TO_TICKS(1000)) != ERROR_NONE) {
-            completed = false;
+            LOG_E(TAG, "Failed to write to the speaker");
+            result = PlayResult::Failed;
             break;
         }
     }
@@ -225,7 +231,7 @@ bool play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopR
     setAmpEnabled(false);
     writeSilence(handle, audio.sampleRate, PADDING_MILLIS);
     audio_stream_close(handle);
-    return completed;
+    return result;
 }
 
 struct Note {

@@ -833,21 +833,33 @@ void drainStopCommands(Context* ctx) {
     }
 }
 
-/** @return true when the speech was interrupted by the button */
-bool speak(Context* ctx, Button& button, const std::string& text) {
+enum class SpeakResult {
+    Completed,
+    /** The button was pressed while speaking */
+    Interrupted,
+    Failed,
+};
+
+/** @param[out] error why the speech failed */
+SpeakResult speak(Context* ctx, Button& button, const std::string& text, std::string& error) {
     Pcm speech;
-    const auto error = synthesize(ctx->config, text, speech);
+    error = synthesize(ctx->config, text, speech);
     if (!error.empty()) {
         LOG_W(TAG, "Speech failed: %s", error.c_str());
-        return false;
+        return SpeakResult::Failed;
     }
     ctx->stopRequested = false;
-    const bool completed = play(ctx->stream, speech, [ctx, &button] {
+    const auto result = play(ctx->stream, speech, [ctx, &button] {
         pollStop(ctx, button);
         drainStopCommands(ctx);
         return ctx->stopRequested || !ctx->running;
     });
-    return !completed && ctx->running;
+    if (result == PlayResult::Failed) {
+        error = "No pude usar el parlante.";
+        appendLog("Parlante: falló la reproducción");
+        return SpeakResult::Failed;
+    }
+    return result == PlayResult::Interrupted && ctx->running ? SpeakResult::Interrupted : SpeakResult::Completed;
 }
 
 /**
@@ -896,6 +908,8 @@ void converse(Context* ctx, Button& button, Mode mode, const std::string& openin
         Reply reply;
         const auto error = ask(context, ctx->history, listen ? &audio : nullptr, pendingText, reply);
         pendingText.clear();
+        // Frees the recording before the speech arrives
+        audio = Pcm();
         if (!error.empty()) {
             showMessage(ctx, "No pude responder", error);
             return;
@@ -908,20 +922,26 @@ void converse(Context* ctx, Button& button, Mode mode, const std::string& openin
         }
         ctx->lastTurnTime = time(nullptr);
 
+        std::string speechError;
         if (reply.action == "emergencia") {
             show(ctx, Screen::Emergency, "", reply.answer);
-            speak(ctx, button, reply.answer);
+            speak(ctx, button, reply.answer, speechError);
             return;
         }
 
         show(ctx, Screen::Answer, "Hablando... apriete el botón para interrumpir", reply.answer, listen ? reply.heard : "");
-        const bool interrupted = speak(ctx, button, reply.answer);
+        const auto spoken = speak(ctx, button, reply.answer, speechError);
+        if (spoken == SpeakResult::Failed) {
+            // The answer stays readable on the screen
+            show(ctx, Screen::Answer, std::format("No pude decirlo en voz alta. {}", speechError), reply.answer, listen ? reply.heard : "");
+            return;
+        }
         const bool formDone = mode == Mode::Form && isFormComplete(ctx->form);
         if (formDone) {
             show(ctx, Screen::FormReady);
             return;
         }
-        if (!interrupted && mode != Mode::Form) {
+        if (spoken == SpeakResult::Completed && mode != Mode::Form) {
             show(ctx, Screen::Answer, "", reply.answer, listen ? reply.heard : "");
             return;
         }
@@ -940,9 +960,10 @@ void ringAlarm(Context* ctx, Button& button, int index) {
     playTone(ctx->stream, Tone::Alarm);
     const auto& reminder = ctx->reminders[index];
     const auto greeting = ctx->config.userName.empty() ? std::string("Hola") : std::format("Hola, {}", ctx->config.userName);
-    const bool interrupted = speak(ctx, button, std::format("{}. Es hora de tomar su {} de {}. {}", greeting, reminder.name, reminder.dose, reminder.note));
+    std::string speechError;
+    const auto spoken = speak(ctx, button, std::format("{}. Es hora de tomar su {} de {}. {}", greeting, reminder.name, reminder.dose, reminder.note), speechError);
     // The button means "ya me lo tomé" on the alarm screen
-    if (interrupted) {
+    if (spoken == SpeakResult::Interrupted) {
         markTaken(ctx, index);
         ctx->alarmIndex = -1;
         show(ctx, Screen::Home);

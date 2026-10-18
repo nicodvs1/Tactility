@@ -75,4 +75,7 @@ bool saveForm(const HourRequest& form);
 /** Makes the launcher start De Vuelta at boot, unless another app was configured */
 void enableAutoStart();
 
+/** Adds a timestamped line to registro.txt on the SD card, which keeps the latest problems and timings */
+void appendLog(const std::string& line);
+
 }

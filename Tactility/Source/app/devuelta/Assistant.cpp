@@ -16,6 +16,8 @@
 #ifdef ESP_PLATFORM
 #include <esp_heap_caps.h>
 #include <esp_http_client.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <mbedtls/base64.h>
 #endif
 
@@ -198,16 +200,27 @@ static int postOnce(const std::string& url, const std::string& apiKey, const std
             response.reserve(contentLength > 0 ? contentLength + 1 : 65536);
             uint8_t chunk[2048];
             int count;
+            bool complete = true;
             while ((count = esp_http_client_read(client, reinterpret_cast<char*>(chunk), sizeof(chunk))) > 0) {
                 if (!response.append(chunk, count)) {
-                    LOG_E(TAG, "Out of memory for the response");
+                    failure = "memoria";
+                    complete = false;
                     break;
                 }
             }
+            if (complete && (count < 0 || !esp_http_client_is_complete_data_received(client))) {
+                failure = std::format("read {}, {} of {} bytes", count, response.size(), contentLength);
+                complete = false;
+            }
             const uint8_t terminator = 0;
-            response.append(&terminator, 1);
-            response.setSize(response.size() - 1);
-            status = esp_http_client_get_status_code(client);
+            if (complete && !response.append(&terminator, 1)) {
+                failure = "memoria";
+                complete = false;
+            }
+            if (complete) {
+                response.setSize(response.size() - 1);
+                status = esp_http_client_get_status_code(client);
+            }
         } else if (written) {
             failure = std::format("headers {}", contentLength);
         }
@@ -228,48 +241,78 @@ static bool isWifiConnected() {
     return state == WIFI_STATION_STATE_CONNECTED;
 }
 
+static bool isTransientStatus(int status) {
+    return status == 500 || status == 502 || status == 503 || status == 504;
+}
+
 /**
- * Retries once when the connection couldn't be opened.
+ * Retries once when the connection couldn't be opened or the service was temporarily unavailable.
  * @param[out] failure where the request stopped, when it didn't complete
  * @return the HTTP status, or -1 when the request didn't complete
  */
 static int post(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, Buffer& response, std::string& failure) {
     int status = postOnce(url, apiKey, parts, response, failure);
-    if (status < 0 && failure.starts_with("open")) {
-        LOG_W(TAG, "Retrying after %s", failure.c_str());
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    if ((status < 0 && failure.starts_with("open")) || isTransientStatus(status)) {
+        LOG_W(TAG, "Retrying after %d %s", status, failure.c_str());
+        appendLog(std::format("Reintento tras {} {}", status, failure));
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        failure.clear();
         status = postOnce(url, apiKey, parts, response, failure);
     }
     return status;
 }
 
-static std::string describeHttpError(int status, const Buffer& response, const std::string& failure) {
-    if (status < 0) {
-        LOG_E(TAG, "Request failed at %s", failure.c_str());
-        if (!isWifiConnected()) {
-            return "No me pude conectar a internet. Revise que el WiFi esté funcionando.";
-        }
-        return std::format("El WiFi está conectado, pero no pude llegar a Gemini. Intente de nuevo. (Detalle: {})", failure);
-    }
+static std::string getClockState() {
+    const time_t now = time(nullptr);
+    tm local {};
+    localtime_r(&now, &local);
+    return local.tm_year + 1900 >= 2025 ? "hora ok" : "hora sin sincronizar";
+}
+
+/** @return the error message of a Gemini error response, shortened for the screen */
+static std::string getServiceMessage(const Buffer& response) {
     std::string message;
     cJSON* json = cJSON_Parse(reinterpret_cast<const char*>(response.data()));
     const cJSON* error = cJSON_GetObjectItemCaseSensitive(json, "error");
     const cJSON* detail = cJSON_GetObjectItemCaseSensitive(error, "message");
     if (cJSON_IsString(detail)) {
         message = detail->valuestring;
+    } else if (response.size() > 0) {
+        message = std::string(reinterpret_cast<const char*>(response.data()), std::min<size_t>(response.size(), 200));
     }
     cJSON_Delete(json);
-    LOG_E(TAG, "HTTP %d: %s", status, message.c_str());
+    constexpr size_t MAX_LENGTH = 160;
+    if (message.size() > MAX_LENGTH) {
+        message = message.substr(0, MAX_LENGTH) + "...";
+    }
+    return message;
+}
+
+static std::string describeHttpError(const char* request, int status, const Buffer& response, const std::string& failure) {
+    if (status < 0) {
+        LOG_E(TAG, "%s failed at %s", request, failure.c_str());
+        appendLog(std::format("{}: sin respuesta, {}, {}", request, failure, getClockState()));
+        if (failure == "memoria") {
+            return "No hay memoria suficiente para recibir la respuesta. Intente de nuevo.";
+        }
+        if (!isWifiConnected()) {
+            return "No me pude conectar a internet. Revise que el WiFi esté funcionando.";
+        }
+        return std::format("El WiFi está conectado, pero no pude llegar a Gemini. Intente de nuevo. (Detalle: {}, {})", failure, getClockState());
+    }
+    const auto message = getServiceMessage(response);
+    LOG_E(TAG, "%s HTTP %d: %s", request, status, message.c_str());
+    appendLog(std::format("{}: error {}: {}", request, status, message));
     if (status == 401 || status == 403) {
-        return "Hay un problema con la clave de Gemini. Revise el archivo clave_gemini.txt.";
+        return std::format("Hay un problema con la clave de Gemini. Revise el archivo clave_gemini.txt. (Error {}: {})", status, message);
     }
     if (status == 400 || status == 404) {
-        return "El servicio rechazó la petición. Revise los modelos en el archivo config.json.";
+        return std::format("El servicio rechazó la petición. (Error {}: {})", status, message);
     }
     if (status == 429) {
-        return "Se alcanzó el límite de uso de Gemini. Intente de nuevo en un rato.";
+        return std::format("Se alcanzó el límite de uso de Gemini. Intente de nuevo en un rato. (Error 429: {})", message);
     }
-    return "El servicio no respondió bien. Intente de nuevo en un momento.";
+    return std::format("El servicio no respondió bien. Intente de nuevo en un momento. (Error {}: {})", status, message);
 }
 
 // endregion
@@ -390,7 +433,7 @@ static void addTextContent(cJSON* contents, const char* role, const std::string&
     cJSON_AddItemToArray(contents, content);
 }
 
-static cJSON* createAskRequest(const PromptContext& context, const std::vector<Turn>& history, bool hasAudio, const std::string& text, bool withThinking) {
+static cJSON* createAskRequest(const PromptContext& context, const std::vector<Turn>& history, bool hasAudio, const std::string& text, const std::string& thinkingLevel) {
     cJSON* request = cJSON_CreateObject();
 
     cJSON* system = cJSON_AddObjectToObject(request, "systemInstruction");
@@ -423,11 +466,11 @@ static cJSON* createAskRequest(const PromptContext& context, const std::vector<T
     cJSON* generation = cJSON_AddObjectToObject(request, "generationConfig");
     cJSON_AddStringToObject(generation, "responseMimeType", "application/json");
     cJSON_AddItemToObject(generation, "responseSchema", createResponseSchema());
-    cJSON_AddNumberToObject(generation, "temperature", 0.4);
-    cJSON_AddNumberToObject(generation, "maxOutputTokens", 1024);
-    if (withThinking) {
+    // Room for the thinking tokens too
+    cJSON_AddNumberToObject(generation, "maxOutputTokens", 4096);
+    if (!thinkingLevel.empty()) {
         cJSON* thinking = cJSON_AddObjectToObject(generation, "thinkingConfig");
-        cJSON_AddStringToObject(thinking, "thinkingLevel", context.config->thinkingLevel.c_str());
+        cJSON_AddStringToObject(thinking, "thinkingLevel", thinkingLevel.c_str());
     }
     return request;
 }
@@ -474,6 +517,17 @@ static bool encodeBase64(const Buffer& input, Buffer& output) {
 static std::string getString(const cJSON* object, const char* key) {
     const cJSON* item = cJSON_GetObjectItemCaseSensitive(object, key);
     return cJSON_IsString(item) && item->valuestring != nullptr ? item->valuestring : "";
+}
+
+/** @return why the first candidate stopped, or why the prompt was blocked */
+static std::string getFinishReason(const cJSON* response) {
+    const cJSON* feedback = cJSON_GetObjectItemCaseSensitive(response, "promptFeedback");
+    const auto blocked = getString(feedback, "blockReason");
+    if (!blocked.empty()) {
+        return blocked;
+    }
+    const cJSON* candidate = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(response, "candidates"), 0);
+    return getString(candidate, "finishReason");
 }
 
 /** @return the non-thought text of the first candidate */
@@ -533,9 +587,16 @@ std::string ask(const PromptContext& context, const std::vector<Turn>& history, 
     Buffer response;
     std::string failure;
     int status = -1;
-    // Retried without the thinking level, for models that don't support it
-    for (const bool withThinking : { !context.config->thinkingLevel.empty(), false }) {
-        cJSON* request = createAskRequest(context, history, audio != nullptr, text, withThinking);
+    // A model that rejects the configured thinking level is retried with "low", and then with its default
+    std::vector<std::string> thinkingLevels { context.config->thinkingLevel };
+    for (const char* fallback : { "low", "" }) {
+        if (std::find(thinkingLevels.begin(), thinkingLevels.end(), fallback) == thinkingLevels.end()) {
+            thinkingLevels.push_back(fallback);
+        }
+    }
+    const TickType_t start = xTaskGetTickCount();
+    for (size_t attempt = 0; attempt < thinkingLevels.size(); attempt++) {
+        cJSON* request = createAskRequest(context, history, audio != nullptr, text, thinkingLevels[attempt]);
         char* json = cJSON_PrintUnformatted(request);
         cJSON_Delete(request);
         if (json == nullptr) {
@@ -555,23 +616,27 @@ std::string ask(const PromptContext& context, const std::vector<Turn>& history, 
 
         status = post(url, context.config->apiKey, parts, response, failure);
         cJSON_free(json);
-        if (status != 400 || !withThinking) {
+        if (status != 400 || attempt + 1 == thinkingLevels.size()) {
             break;
         }
-        LOG_W(TAG, "Retrying without thinking level");
+        LOG_W(TAG, "Retrying with thinking level '%s'", thinkingLevels[attempt + 1].c_str());
+        appendLog(std::format("Pregunta: error 400 con razonamiento '{}': {}", thinkingLevels[attempt], getServiceMessage(response)));
     }
 
     if (status != 200) {
-        return describeHttpError(status, response, failure);
+        return describeHttpError("Pregunta", status, response, failure);
     }
 
     cJSON* json = cJSON_Parse(reinterpret_cast<const char*>(response.data()));
     const auto answerText = getAnswerText(json);
+    const auto finishReason = getFinishReason(json);
     cJSON_Delete(json);
     if (!parseReply(answerText, reply)) {
-        LOG_E(TAG, "Unexpected answer: %s", answerText.c_str());
-        return "No entendí la respuesta del servicio. Intente de nuevo.";
+        LOG_E(TAG, "Unexpected answer (%s): %s", finishReason.c_str(), answerText.c_str());
+        appendLog(std::format("Pregunta: respuesta inesperada ({}): {}", finishReason, answerText.substr(0, 200)));
+        return std::format("No entendí la respuesta del servicio. Intente de nuevo. (Detalle: {})", finishReason.empty() ? "respuesta vacía" : finishReason);
     }
+    appendLog(std::format("Pregunta respondida en {} ms", pdTICKS_TO_MS(xTaskGetTickCount() - start)));
     return "";
 }
 
@@ -579,58 +644,82 @@ std::string ask(const PromptContext& context, const std::vector<Turn>& history, 
 
 // region Speech
 
-/** Finds the longest JSON string value of a "data" key, which holds the base64 audio */
-static bool findAudioData(const Buffer& response, const char*& start, size_t& length) {
-    const char* text = reinterpret_cast<const char*>(response.data());
-    const char* end = text + response.size();
-    length = 0;
-    const char* cursor = text;
-    while ((cursor = strstr(cursor, "\"data\"")) != nullptr && cursor < end) {
-        cursor += 6;
-        while (cursor < end && (*cursor == ' ' || *cursor == ':')) {
-            cursor++;
-        }
-        if (cursor >= end || *cursor != '"') {
-            continue;
-        }
-        const char* valueStart = ++cursor;
-        while (cursor < end && *cursor != '"') {
-            cursor++;
-        }
-        const size_t valueLength = cursor - valueStart;
-        if (valueLength > length) {
-            start = valueStart;
-            length = valueLength;
-        }
-    }
-    return length > 0;
+static uint32_t readLittleEndian16(const uint8_t* bytes) {
+    return bytes[0] | (bytes[1] << 8);
 }
 
 static uint32_t readLittleEndian32(const uint8_t* bytes) {
     return bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (static_cast<uint32_t>(bytes[3]) << 24);
 }
 
-/** Turns a decoded WAV file into its PCM samples, in place */
-static bool unwrapWav(Pcm& speech) {
-    uint8_t* bytes = speech.samples.data();
-    const size_t size = speech.samples.size();
+/** Appends 16-bit PCM, mixed down to mono */
+static bool appendSamples(Pcm& speech, const uint8_t* bytes, size_t size, uint32_t channels) {
+    if (channels <= 1) {
+        return speech.samples.append(bytes, size & ~static_cast<size_t>(1));
+    }
+    const size_t frameSize = channels * sizeof(int16_t);
+    if (!speech.samples.reserve(speech.samples.size() + size / channels)) {
+        return false;
+    }
+    for (size_t offset = 0; offset + frameSize <= size; offset += frameSize) {
+        int32_t sum = 0;
+        for (uint32_t channel = 0; channel < channels; channel++) {
+            sum += static_cast<int16_t>(readLittleEndian16(bytes + offset + channel * sizeof(int16_t)));
+        }
+        const auto sample = static_cast<int16_t>(sum / static_cast<int32_t>(channels));
+        speech.samples.append(&sample, sizeof(sample));
+    }
+    return true;
+}
+
+/**
+ * Appends one decoded audio piece: a WAV file, or raw 16-bit little-endian PCM.
+ * @return empty on success, or a message for the user
+ */
+static std::string appendAudioPiece(Pcm& speech, const Buffer& decoded, uint32_t sampleRate, uint32_t channels) {
+    const uint8_t* bytes = decoded.data();
+    const size_t size = decoded.size();
     if (size < 12 || memcmp(bytes, "RIFF", 4) != 0 || memcmp(bytes + 8, "WAVE", 4) != 0) {
-        return true;
+        speech.sampleRate = sampleRate;
+        return appendSamples(speech, bytes, size, channels) ? "" : "No hay memoria suficiente para el audio.";
     }
     size_t offset = 12;
     while (offset + 8 <= size) {
         const uint32_t chunkSize = readLittleEndian32(bytes + offset + 4);
-        if (memcmp(bytes + offset, "fmt ", 4) == 0 && offset + 16 <= size) {
-            speech.sampleRate = readLittleEndian32(bytes + offset + 12);
+        const size_t remaining = size - offset - 8;
+        if (memcmp(bytes + offset, "fmt ", 4) == 0 && remaining >= 16) {
+            const uint32_t format = readLittleEndian16(bytes + offset + 8);
+            channels = readLittleEndian16(bytes + offset + 10);
+            sampleRate = readLittleEndian32(bytes + offset + 12);
+            const uint32_t bits = readLittleEndian16(bytes + offset + 22);
+            if (format != 1 || bits != 16 || channels == 0) {
+                LOG_E(TAG, "Unsupported WAV: format %u, %u bits, %u channels", static_cast<unsigned>(format), static_cast<unsigned>(bits), static_cast<unsigned>(channels));
+                return std::format("El audio llegó en un formato que no puedo reproducir ({} bits).", bits);
+            }
         } else if (memcmp(bytes + offset, "data", 4) == 0) {
-            const size_t dataSize = std::min<size_t>(chunkSize, size - offset - 8);
-            memmove(bytes, bytes + offset + 8, dataSize);
-            speech.samples.setSize(dataSize);
-            return true;
+            // Streaming encoders may leave the size at 0 or at the maximum
+            const size_t dataSize = chunkSize == 0 || chunkSize > remaining ? remaining : chunkSize;
+            speech.sampleRate = sampleRate;
+            return appendSamples(speech, bytes + offset + 8, dataSize, channels) ? "" : "No hay memoria suficiente para el audio.";
         }
         offset += 8 + chunkSize + (chunkSize & 1);
     }
-    return false;
+    return "El audio llegó incompleto.";
+}
+
+/** Collects the objects that hold audio data anywhere in the response, in the order they were generated */
+static void findAudioItems(const cJSON* node, std::vector<const cJSON*>& items) {
+    if (cJSON_IsObject(node)) {
+        const bool isAudio = getString(node, "type") == "audio" || getString(node, "mime_type").starts_with("audio/") || getString(node, "mimeType").starts_with("audio/");
+        if (isAudio && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(node, "data"))) {
+            items.push_back(node);
+            return;
+        }
+    }
+    const cJSON* child;
+    cJSON_ArrayForEach(child, node) {
+        findAudioItems(child, items);
+    }
 }
 
 std::string synthesize(const Config& config, const std::string& text, Pcm& speech) {
@@ -651,6 +740,8 @@ std::string synthesize(const Config& config, const std::string& text, Pcm& speec
     cJSON_AddStringToObject(annotation, "style", SPEECH_STYLE);
     cJSON_AddItemToArray(annotations, annotation);
     cJSON_AddItemToArray(input, textInput);
+    const char* modalities[] = { "audio" };
+    cJSON_AddItemToObject(request, "response_modalities", cJSON_CreateStringArray(modalities, 1));
     cJSON* format = cJSON_AddObjectToObject(request, "response_format");
     cJSON_AddStringToObject(format, "type", "audio");
     cJSON_AddStringToObject(format, "mime_type", "audio/wav");
@@ -666,43 +757,62 @@ std::string synthesize(const Config& config, const std::string& text, Pcm& speec
     if (json == nullptr) {
         return "No hay memoria suficiente.";
     }
+    const TickType_t start = xTaskGetTickCount();
     Buffer response;
     std::string failure;
     const int status = post(std::format("{}/interactions", API_BASE), config.apiKey, { { json, strlen(json) } }, response, failure);
     cJSON_free(json);
     if (status != 200) {
-        return describeHttpError(status, response, failure);
+        return describeHttpError("Voz", status, response, failure);
     }
 
-    const char* data = nullptr;
-    size_t length = 0;
-    if (!findAudioData(response, data, length)) {
-        return "El servicio no devolvió audio.";
+    cJSON* parsed = cJSON_Parse(reinterpret_cast<const char*>(response.data()));
+    // The parsed copy holds the audio from here on
+    response = Buffer();
+    if (parsed == nullptr) {
+        appendLog("Voz: la respuesta no es JSON válido");
+        return "La voz llegó dañada.";
     }
-    // JSON may escape the slashes of the base64 alphabet
-    char* compacted = const_cast<char*>(data);
-    size_t compactedLength = 0;
-    for (size_t i = 0; i < length; i++) {
-        if (data[i] != '\\') {
-            compacted[compactedLength++] = data[i];
+    std::vector<const cJSON*> items;
+    findAudioItems(parsed, items);
+    speech.samples.clear();
+    std::string error = items.empty() ? "El servicio no devolvió audio." : "";
+    for (const cJSON* item : items) {
+        const cJSON* data = cJSON_GetObjectItemCaseSensitive(item, "data");
+        if (!cJSON_IsString(data) || data->valuestring == nullptr) {
+            continue;
+        }
+        const auto* base64 = reinterpret_cast<const uint8_t*>(data->valuestring);
+        const size_t length = strlen(data->valuestring);
+        size_t decodedSize = 0;
+        mbedtls_base64_decode(nullptr, 0, &decodedSize, base64, length);
+        Buffer decoded;
+        size_t written = 0;
+        if (!decoded.reserve(decodedSize + 1)) {
+            error = "No hay memoria suficiente para el audio.";
+            break;
+        }
+        if (mbedtls_base64_decode(decoded.data(), decoded.getCapacity(), &written, base64, length) != 0) {
+            error = "La voz llegó dañada.";
+            break;
+        }
+        decoded.setSize(written);
+        const cJSON* rate = cJSON_GetObjectItemCaseSensitive(item, "sample_rate");
+        const cJSON* channels = cJSON_GetObjectItemCaseSensitive(item, "channels");
+        error = appendAudioPiece(speech, decoded, cJSON_IsNumber(rate) && rate->valueint > 0 ? rate->valueint : 24000, cJSON_IsNumber(channels) && channels->valueint > 0 ? channels->valueint : 1);
+        if (!error.empty()) {
+            appendLog(std::format("Voz: pieza de audio {} ({})", error, getString(item, "mime_type")));
+            break;
         }
     }
-    length = compactedLength;
-    size_t decodedSize = 0;
-    mbedtls_base64_decode(nullptr, 0, &decodedSize, reinterpret_cast<const uint8_t*>(data), length);
-    speech.samples.clear();
-    if (!speech.samples.reserve(decodedSize)) {
-        return "No hay memoria suficiente para el audio.";
+    cJSON_Delete(parsed);
+    if (error.empty() && speech.samples.size() == 0) {
+        error = "El servicio no devolvió audio.";
     }
-    size_t written = 0;
-    if (mbedtls_base64_decode(speech.samples.data(), speech.samples.getCapacity(), &written, reinterpret_cast<const uint8_t*>(data), length) != 0) {
-        return "El audio llegó dañado.";
+    if (!error.empty()) {
+        return error;
     }
-    speech.samples.setSize(written);
-    speech.sampleRate = 16000;
-    if (!unwrapWav(speech)) {
-        return "El audio llegó en un formato desconocido.";
-    }
+    appendLog(std::format("Voz generada en {} ms, {} ms de audio a {} Hz", pdTICKS_TO_MS(xTaskGetTickCount() - start), speech.getSampleCount() * 1000 / speech.sampleRate, speech.sampleRate));
     return "";
 }
 
