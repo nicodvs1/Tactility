@@ -1,5 +1,7 @@
 #include "Assistant.h"
 
+#include <tactility/device.h>
+#include <tactility/drivers/wifi.h>
 #include <tactility/log.h>
 
 #include <cJSON.h>
@@ -96,8 +98,11 @@ struct Part {
     size_t size;
 };
 
-/** @return the HTTP status, or -1 when the request didn't complete */
-static int post(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, Buffer& response) {
+/**
+ * @param[out] failure where the request stopped, when it didn't complete
+ * @return the HTTP status, or -1 when the request didn't complete
+ */
+static int post(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, Buffer& response, std::string& failure) {
     esp_http_client_config_t config {};
     config.url = url.c_str();
     config.method = HTTP_METHOD_POST;
@@ -108,6 +113,7 @@ static int post(const std::string& url, const std::string& apiKey, const std::ve
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == nullptr) {
+        failure = "init";
         return -1;
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
@@ -119,7 +125,10 @@ static int post(const std::string& url, const std::string& apiKey, const std::ve
     }
 
     int status = -1;
-    if (esp_http_client_open(client, static_cast<int>(total)) == ESP_OK) {
+    const esp_err_t openResult = esp_http_client_open(client, static_cast<int>(total));
+    if (openResult != ESP_OK) {
+        failure = std::format("open {}", esp_err_to_name(openResult));
+    } else {
         bool written = true;
         for (const auto& part : parts) {
             size_t offset = 0;
@@ -127,6 +136,7 @@ static int post(const std::string& url, const std::string& apiKey, const std::ve
                 const int chunk = std::min<size_t>(part.size - offset, 4096);
                 const int result = esp_http_client_write(client, part.data + offset, chunk);
                 if (result <= 0) {
+                    failure = std::format("write {}", result);
                     written = false;
                 } else {
                     offset += result;
@@ -150,6 +160,8 @@ static int post(const std::string& url, const std::string& apiKey, const std::ve
             response.append(&terminator, 1);
             response.setSize(response.size() - 1);
             status = esp_http_client_get_status_code(client);
+        } else if (written) {
+            failure = std::format("headers {}", contentLength);
         }
         esp_http_client_close(client);
     }
@@ -157,9 +169,24 @@ static int post(const std::string& url, const std::string& apiKey, const std::ve
     return status;
 }
 
-static std::string describeHttpError(int status, const Buffer& response) {
+static bool isWifiConnected() {
+    Device* wifi = nullptr;
+    if (device_get_first_by_type(&WIFI_TYPE, &wifi) != ERROR_NONE) {
+        return false;
+    }
+    WifiStationState state = WIFI_STATION_STATE_DISCONNECTED;
+    wifi_get_station_state(wifi, &state);
+    device_put(wifi);
+    return state == WIFI_STATION_STATE_CONNECTED;
+}
+
+static std::string describeHttpError(int status, const Buffer& response, const std::string& failure) {
     if (status < 0) {
-        return "No me pude conectar a internet. Revise que el WiFi esté funcionando.";
+        LOG_E(TAG, "Request failed at %s", failure.c_str());
+        if (!isWifiConnected()) {
+            return "No me pude conectar a internet. Revise que el WiFi esté funcionando.";
+        }
+        return std::format("El WiFi está conectado, pero no pude llegar a Gemini. Intente de nuevo. (Detalle: {})", failure);
     }
     std::string message;
     cJSON* json = cJSON_Parse(reinterpret_cast<const char*>(response.data()));
@@ -171,7 +198,7 @@ static std::string describeHttpError(int status, const Buffer& response) {
     cJSON_Delete(json);
     LOG_E(TAG, "HTTP %d: %s", status, message.c_str());
     if (status == 401 || status == 403) {
-        return "Hay un problema con la clave de Gemini. Revise el archivo config.json.";
+        return "Hay un problema con la clave de Gemini. Revise el archivo clave_gemini.txt.";
     }
     if (status == 400 || status == 404) {
         return "El servicio rechazó la petición. Revise los modelos en el archivo config.json.";
@@ -441,6 +468,7 @@ std::string ask(const PromptContext& context, const std::vector<Turn>& history, 
 
     const auto url = std::format("{}/models/{}:generateContent", API_BASE, context.config->model);
     Buffer response;
+    std::string failure;
     int status = -1;
     // Retried without the thinking level, for models that don't support it
     for (const bool withThinking : { !context.config->thinkingLevel.empty(), false }) {
@@ -462,7 +490,7 @@ std::string ask(const PromptContext& context, const std::vector<Turn>& history, 
             parts.push_back({ json, strlen(json) });
         }
 
-        status = post(url, context.config->apiKey, parts, response);
+        status = post(url, context.config->apiKey, parts, response, failure);
         cJSON_free(json);
         if (status != 400 || !withThinking) {
             break;
@@ -471,7 +499,7 @@ std::string ask(const PromptContext& context, const std::vector<Turn>& history, 
     }
 
     if (status != 200) {
-        return describeHttpError(status, response);
+        return describeHttpError(status, response, failure);
     }
 
     cJSON* json = cJSON_Parse(reinterpret_cast<const char*>(response.data()));
@@ -576,10 +604,11 @@ std::string synthesize(const Config& config, const std::string& text, Pcm& speec
         return "No hay memoria suficiente.";
     }
     Buffer response;
-    const int status = post(std::format("{}/interactions", API_BASE), config.apiKey, { { json, strlen(json) } }, response);
+    std::string failure;
+    const int status = post(std::format("{}/interactions", API_BASE), config.apiKey, { { json, strlen(json) } }, response, failure);
     cJSON_free(json);
     if (status != 200) {
-        return describeHttpError(status, response);
+        return describeHttpError(status, response, failure);
     }
 
     const char* data = nullptr;
