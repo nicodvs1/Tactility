@@ -150,7 +150,7 @@ static int postOnce(const std::string& url, const std::string& apiKey, const std
     esp_http_client_config_t config {};
     config.url = url.c_str();
     config.method = HTTP_METHOD_POST;
-    config.timeout_ms = 45000;
+    config.timeout_ms = 60000;
     config.addr_type = HTTP_ADDR_TYPE_INET;
     config.cert_pem = GOOGLE_ROOT_CERTIFICATES;
     config.cert_len = sizeof(GOOGLE_ROOT_CERTIFICATES);
@@ -209,7 +209,7 @@ static int postOnce(const std::string& url, const std::string& apiKey, const std
                 }
             }
             if (complete && (count < 0 || !esp_http_client_is_complete_data_received(client))) {
-                failure = std::format("read {}, {} of {} bytes", count, response.size(), contentLength);
+                failure = count == -ESP_ERR_HTTP_EAGAIN ? "tiempo" : std::format("read {}, {} of {} bytes", count, response.size(), contentLength);
                 complete = false;
             }
             const uint8_t terminator = 0;
@@ -222,7 +222,7 @@ static int postOnce(const std::string& url, const std::string& apiKey, const std
                 status = esp_http_client_get_status_code(client);
             }
         } else if (written) {
-            failure = std::format("headers {}", contentLength);
+            failure = contentLength == -ESP_ERR_HTTP_EAGAIN ? "tiempo" : std::format("headers {}", contentLength);
         }
         esp_http_client_close(client);
     }
@@ -294,6 +294,9 @@ static std::string describeHttpError(const char* request, int status, const Buff
         appendLog(std::format("{}: sin respuesta, {}, {}", request, failure, getClockState()));
         if (failure == "memoria") {
             return "No hay memoria suficiente para recibir la respuesta. Intente de nuevo.";
+        }
+        if (failure == "tiempo") {
+            return "Gemini se demoró demasiado en responder. Intente de nuevo en un momento.";
         }
         if (!isWifiConnected()) {
             return "No me pude conectar a internet. Revise que el WiFi esté funcionando.";
