@@ -211,6 +211,8 @@
 		pin-d3 = <&gpio0 3 GPIO_FLAG_NONE>;
 		slot = <SDMMC_HOST_SLOT_1>;
 		bus-width = <4>;
+		// The SD lines have no external pull-ups
+		pullups;
 	};
 
 	usbdevice0 {
