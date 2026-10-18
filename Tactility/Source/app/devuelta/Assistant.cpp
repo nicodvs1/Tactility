@@ -20,14 +20,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <mbedtls/base64.h>
-#include <mbedtls/ssl.h>
-#include <mbedtls/x509_crt.h>
 
 #include <TactilityCpp/Memory.h>
 #include <tactility/check.h>
-
-/** The certificate check of the bundle, which esp_crt_bundle_attach() installs */
-extern "C" int esp_crt_verify_callback(void* context, mbedtls_x509_crt* certificate, int depth, uint32_t* flags);
 #endif
 
 namespace tt::app::devuelta {
@@ -108,169 +103,6 @@ struct Part {
     size_t size;
 };
 
-/** The Google Trust Services roots of the Gemini API: R1 (RSA), R3 and R4 (ECDSA) */
-constexpr char GOOGLE_ROOT_CERTIFICATES[] =
-    "-----BEGIN CERTIFICATE-----\n"
-    "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\n"
-    "bP6MvPJwNQzcmRk13NfIRmPVNnGuV/u3gm3c\n"
-    "-----END CERTIFICATE-----\n"
-    "-----BEGIN CERTIFICATE-----\n"
-    "MIICCTCCAY6gAwIBAgINAgPluILrIPglJ209ZjAKBggqhkjOPQQDAzBHMQswCQYD\n"
-    "VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n"
-    "A1UEAxMLR1RTIFJvb3QgUjMwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAwMDAw\n"
-    "WjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2Vz\n"
-    "IExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjMwdjAQBgcqhkjOPQIBBgUrgQQAIgNi\n"
-    "AAQfTzOHMymKoYTey8chWEGJ6ladK0uFxh1MJ7x/JlFyb+Kf1qPKzEUURout736G\n"
-    "jOyxfi//qXGdGIRFBEFVbivqJn+7kAHjSxm65FSWRQmx1WyRRK2EE46ajA2ADDL2\n"
-    "4CejQjBAMA4GA1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQW\n"
-    "BBTB8Sa6oC2uhYHP0/EqEr24Cmf9vDAKBggqhkjOPQQDAwNpADBmAjEA9uEglRR7\n"
-    "VKOQFhG/hMjqb2sXnh5GmCCbn9MN2azTL818+FsuVbu/3ZL3pAzcMeGiAjEA/Jdm\n"
-    "ZuVDFhOD3cffL74UOO0BzrEXGhF16b0DjyZ+hOXJYKaV11RZt+cRLInUue4X\n"
-    "-----END CERTIFICATE-----\n"
-    "-----BEGIN CERTIFICATE-----\n"
-    "MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD\n"
-    "VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n"
-    "A1UEAxMLR1RTIFJvb3QgUjQwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAwMDAw\n"
-    "WjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2Vz\n"
-    "IExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjQwdjAQBgcqhkjOPQIBBgUrgQQAIgNi\n"
-    "AATzdHOnaItgrkO4NcWBMHtLSZ37wWHO5t5GvWvVYRg1rkDdc/eJkTBa6zzuhXyi\n"
-    "QHY7qca4R9gq55KRanPpsXI5nymfopjTX15YhmUPoYRlBtHci8nHc8iMai/lxKvR\n"
-    "HYqjQjBAMA4GA1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQW\n"
-    "BBSATNbrdP9JNqPV2Py1PsVq8JQdjDAKBggqhkjOPQQDAwNpADBmAjEA6ED/g94D\n"
-    "9J+uHXqnLrmvT/aDHQ4thQEd0dlq7A/Cr8deVl5c1RxYIigL9zC2L7F8AjEA8GE8\n"
-    "p/SgguMh1YQdc4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD\n"
-    "-----END CERTIFICATE-----\n";
-
-// region Trust
-
-/** A certificate the server sent, as the verify callback saw it */
-struct ReceivedCertificate {
-    int depth;
-    uint32_t flags;
-    uint32_t flagsAfterBundle;
-    int bundleResult;
-    std::string der;
-};
-
-/** The roots above, with the certificate bundle of the firmware as a fallback */
-struct Trust {
-    mbedtls_x509_crt roots;
-    bool parsed = false;
-    /** The chain the server sent during the last handshake, from the top down */
-    std::vector<ReceivedCertificate> chain;
-    bool loggedWorkingChain = false;
-};
-
-static Trust& getTrust() {
-    static Trust* trust = [] {
-        auto* created = tt::newObject<Trust>();
-        check(created != nullptr);
-        mbedtls_x509_crt_init(&created->roots);
-        const int result = mbedtls_x509_crt_parse(&created->roots, reinterpret_cast<const unsigned char*>(GOOGLE_ROOT_CERTIFICATES), sizeof(GOOGLE_ROOT_CERTIFICATES));
-        created->parsed = result == 0;
-        if (!created->parsed) {
-            LOG_E(TAG, "Failed to parse the Google roots: -0x%X", -result);
-        }
-        return created;
-    }();
-    return *trust;
-}
-
-/**
- * Lets the bundle accept what the Google roots didn't, and records each certificate.
- * A rejection keeps its flags, so the handshake still fails, but the rest of the chain gets recorded too.
- */
-static int verifyCertificate(void*, mbedtls_x509_crt* certificate, int depth, uint32_t* flags) {
-    auto& trust = getTrust();
-    const uint32_t ownFlags = *flags;
-    const int result = esp_crt_verify_callback(nullptr, certificate, depth, flags);
-    trust.chain.push_back({ depth, ownFlags, *flags, result, std::string(reinterpret_cast<const char*>(certificate->raw.p), certificate->raw.len) });
-    return 0;
-}
-
-static esp_err_t attachTrust(void* configuration) {
-    const esp_err_t result = esp_crt_bundle_attach(configuration);
-    if (result != ESP_OK) {
-        return result;
-    }
-    auto& trust = getTrust();
-    auto* ssl = static_cast<mbedtls_ssl_config*>(configuration);
-    if (trust.parsed) {
-        mbedtls_ssl_conf_ca_chain(ssl, &trust.roots, nullptr);
-    }
-    mbedtls_ssl_conf_verify(ssl, verifyCertificate, nullptr);
-    return ESP_OK;
-}
-
-static bool parseCertificate(const ReceivedCertificate& received, mbedtls_x509_crt& certificate) {
-    mbedtls_x509_crt_init(&certificate);
-    return mbedtls_x509_crt_parse_der(&certificate, reinterpret_cast<const unsigned char*>(received.der.data()), received.der.size()) == 0;
-}
-
-/**
- * Describes the recorded chain for registro.txt. Each certificate is checked against the Google roots alone,
- * and against the certificate above it, to tell a missing root apart from a signature the device can't verify.
- */
-static std::string describeChain() {
-    const auto& trust = getTrust();
-    std::string text;
-    std::string info(2048, '\0');
-    for (size_t i = 0; i < trust.chain.size(); i++) {
-        const auto& received = trust.chain[i];
-        mbedtls_x509_crt certificate;
-        if (!parseCertificate(received, certificate)) {
-            text += std::format("  [{}] no se pudo leer\n", received.depth);
-            mbedtls_x509_crt_free(&certificate);
-            continue;
-        }
-        uint32_t rootFlags = 0;
-        const int rootResult = trust.parsed ? mbedtls_x509_crt_verify(&certificate, const_cast<mbedtls_x509_crt*>(&trust.roots), nullptr, nullptr, &rootFlags, nullptr, nullptr) : -1;
-        std::string parentCheck = "sin certificado arriba";
-        mbedtls_x509_crt parent;
-        if (i > 0 && parseCertificate(trust.chain[i - 1], parent)) {
-            uint32_t parentFlags = 0;
-            const int parentResult = mbedtls_x509_crt_verify(&certificate, &parent, nullptr, nullptr, &parentFlags, nullptr, nullptr);
-            parentCheck = std::format("contra el de arriba -0x{:X} flags 0x{:X}", -parentResult, parentFlags);
-            mbedtls_x509_crt_free(&parent);
-        }
-        const int length = mbedtls_x509_crt_info(info.data(), info.size(), "    ", &certificate);
-        text += std::format("  [{}] flags 0x{:X} -> 0x{:X}, bundle -0x{:X}; contra raices Google -0x{:X} flags 0x{:X}; {}\n{}\n",
-            received.depth, received.flags, received.flagsAfterBundle, -received.bundleResult, -rootResult, rootFlags, parentCheck,
-            length > 0 ? info.substr(0, length) : std::format("    (sin detalle -0x{:X})", -length));
-        mbedtls_x509_crt_free(&certificate);
-    }
-    return text;
-}
-
-// endregion
-
 /**
  * Sends the request and reads the response headers.
  * @param[out] failure where the request stopped, when it returns nullptr
@@ -282,7 +114,7 @@ static esp_http_client_handle_t startPost(const std::string& url, const std::str
     config.method = HTTP_METHOD_POST;
     config.timeout_ms = 60000;
     config.addr_type = HTTP_ADDR_TYPE_INET;
-    config.crt_bundle_attach = attachTrust;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
     config.buffer_size = 4096;
     config.buffer_size_tx = 4096;
 
@@ -299,22 +131,13 @@ static esp_http_client_handle_t startPost(const std::string& url, const std::str
         total += part.size;
     }
 
-    auto& trust = getTrust();
-    trust.chain.clear();
     const esp_err_t openResult = esp_http_client_open(client, static_cast<int>(total));
-    if (openResult == ESP_OK && !trust.loggedWorkingChain && !trust.chain.empty()) {
-        trust.loggedWorkingChain = true;
-        appendLog("Cadena de certificados que funcionó:\n" + describeChain());
-    }
     if (openResult != ESP_OK) {
         int tlsCode = 0;
         int tlsFlags = 0;
         const esp_err_t tlsError = esp_http_client_get_and_clear_last_tls_error(client, &tlsCode, &tlsFlags);
         failure = std::format("open {}, {} -0x{:X} {:X}, ram {}k/{}k", esp_err_to_name(openResult), esp_err_to_name(tlsError), -tlsCode, tlsFlags,
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
-        if (!trust.chain.empty()) {
-            appendLog("Cadena de certificados rechazada:\n" + describeChain());
-        }
         esp_http_client_cleanup(client);
         return nullptr;
     }

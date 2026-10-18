@@ -31,7 +31,9 @@ runs:
         target: ${{ inputs.arch }}
         path: './'
         extra_docker_args: -e CCACHE_DIR=/app/${{ github.repository }}/.ccache -e CCACHE_BASEDIR=/app/${{ github.repository }} -e CCACHE_MAXSIZE=2G -e CCACHE_SLOPPINESS=include_file_mtime,include_file_ctime,time_macros
-        command: idf.py --ccache build && (ccache --show-stats || true)
+        # ESP-IDF v6.1 lacks the upstream fix that resets the crypto GDMA TX channel (espressif/esp-idf a07d84f).
+        # Without it, SHA digests break after audio used that channel, and every TLS certificate check fails.
+        command: (git -C "$IDF_PATH" apply --reverse --check "$PWD/Buildscripts/idf-patches/0001-crypto-gdma-tx-reset.patch" 2>/dev/null || git -C "$IDF_PATH" apply "$PWD/Buildscripts/idf-patches/0001-crypto-gdma-tx-reset.patch") && grep -q gdma_ll_tx_reset_channel "$IDF_PATH/components/mbedtls/port/crypto_shared_gdma/esp_crypto_shared_gdma.c" && idf.py --ccache build && (ccache --show-stats || true)
     - name: 'Save compiler cache'
       uses: actions/cache/save@v4
       with:
