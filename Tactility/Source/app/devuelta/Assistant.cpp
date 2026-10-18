@@ -14,11 +14,20 @@
 #include <utility>
 
 #ifdef ESP_PLATFORM
+#include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
 #include <esp_http_client.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <mbedtls/base64.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
+
+#include <TactilityCpp/Memory.h>
+#include <tactility/check.h>
+
+/** The certificate check of the bundle, which esp_crt_bundle_attach() installs */
+extern "C" int esp_crt_verify_callback(void* context, mbedtls_x509_crt* certificate, int depth, uint32_t* flags);
 #endif
 
 namespace tt::app::devuelta {
@@ -99,7 +108,7 @@ struct Part {
     size_t size;
 };
 
-/** The Google Trust Services roots of the Gemini API, RSA (R1) and ECDSA (R4) */
+/** The Google Trust Services roots of the Gemini API: R1 (RSA), R3 and R4 (ECDSA) */
 constexpr char GOOGLE_ROOT_CERTIFICATES[] =
     "-----BEGIN CERTIFICATE-----\n"
     "MIIFVzCCAz+gAwIBAgINAgPlk28xsBNJiGuiFzANBgkqhkiG9w0BAQwFADBHMQsw\n"
@@ -133,6 +142,19 @@ constexpr char GOOGLE_ROOT_CERTIFICATES[] =
     "bP6MvPJwNQzcmRk13NfIRmPVNnGuV/u3gm3c\n"
     "-----END CERTIFICATE-----\n"
     "-----BEGIN CERTIFICATE-----\n"
+    "MIICCTCCAY6gAwIBAgINAgPluILrIPglJ209ZjAKBggqhkjOPQQDAzBHMQswCQYD\n"
+    "VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n"
+    "A1UEAxMLR1RTIFJvb3QgUjMwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAwMDAw\n"
+    "WjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2Vz\n"
+    "IExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjMwdjAQBgcqhkjOPQIBBgUrgQQAIgNi\n"
+    "AAQfTzOHMymKoYTey8chWEGJ6ladK0uFxh1MJ7x/JlFyb+Kf1qPKzEUURout736G\n"
+    "jOyxfi//qXGdGIRFBEFVbivqJn+7kAHjSxm65FSWRQmx1WyRRK2EE46ajA2ADDL2\n"
+    "4CejQjBAMA4GA1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQW\n"
+    "BBTB8Sa6oC2uhYHP0/EqEr24Cmf9vDAKBggqhkjOPQQDAwNpADBmAjEA9uEglRR7\n"
+    "VKOQFhG/hMjqb2sXnh5GmCCbn9MN2azTL818+FsuVbu/3ZL3pAzcMeGiAjEA/Jdm\n"
+    "ZuVDFhOD3cffL74UOO0BzrEXGhF16b0DjyZ+hOXJYKaV11RZt+cRLInUue4X\n"
+    "-----END CERTIFICATE-----\n"
+    "-----BEGIN CERTIFICATE-----\n"
     "MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD\n"
     "VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n"
     "A1UEAxMLR1RTIFJvb3QgUjQwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAwMDAw\n"
@@ -146,14 +168,67 @@ constexpr char GOOGLE_ROOT_CERTIFICATES[] =
     "p/SgguMh1YQdc4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD\n"
     "-----END CERTIFICATE-----\n";
 
+// region Trust
+
+/** The roots above, with the certificate bundle of the firmware as a fallback */
+struct Trust {
+    mbedtls_x509_crt roots;
+    bool parsed = false;
+    /** The chain the server sent during the last handshake, for registro.txt */
+    std::string chain;
+    bool loggedWorkingChain = false;
+};
+
+static Trust& getTrust() {
+    static Trust* trust = [] {
+        auto* created = tt::newObject<Trust>();
+        check(created != nullptr);
+        mbedtls_x509_crt_init(&created->roots);
+        const int result = mbedtls_x509_crt_parse(&created->roots, reinterpret_cast<const unsigned char*>(GOOGLE_ROOT_CERTIFICATES), sizeof(GOOGLE_ROOT_CERTIFICATES));
+        created->parsed = result == 0;
+        if (!created->parsed) {
+            LOG_E(TAG, "Failed to parse the Google roots: -0x%X", -result);
+        }
+        return created;
+    }();
+    return *trust;
+}
+
+/** Records each certificate of the chain, then lets the bundle accept what the Google roots didn't */
+static int verifyCertificate(void*, mbedtls_x509_crt* certificate, int depth, uint32_t* flags) {
+    auto& trust = getTrust();
+    const uint32_t ownFlags = *flags;
+    const int result = esp_crt_verify_callback(nullptr, certificate, depth, flags);
+    std::string info(600, '\0');
+    const int length = mbedtls_x509_crt_info(info.data(), info.size(), "    ", certificate);
+    info.resize(length > 0 ? length : 0);
+    trust.chain += std::format("  [{}] flags 0x{:X} -> 0x{:X}, resultado -0x{:X}\n{}", depth, ownFlags, *flags, -result, info);
+    return result;
+}
+
+static esp_err_t attachTrust(void* configuration) {
+    const esp_err_t result = esp_crt_bundle_attach(configuration);
+    if (result != ESP_OK) {
+        return result;
+    }
+    auto& trust = getTrust();
+    auto* ssl = static_cast<mbedtls_ssl_config*>(configuration);
+    if (trust.parsed) {
+        mbedtls_ssl_conf_ca_chain(ssl, &trust.roots, nullptr);
+    }
+    mbedtls_ssl_conf_verify(ssl, verifyCertificate, nullptr);
+    return ESP_OK;
+}
+
+// endregion
+
 static int postOnce(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, Buffer& response, std::string& failure) {
     esp_http_client_config_t config {};
     config.url = url.c_str();
     config.method = HTTP_METHOD_POST;
     config.timeout_ms = 60000;
     config.addr_type = HTTP_ADDR_TYPE_INET;
-    config.cert_pem = GOOGLE_ROOT_CERTIFICATES;
-    config.cert_len = sizeof(GOOGLE_ROOT_CERTIFICATES);
+    config.crt_bundle_attach = attachTrust;
     config.buffer_size = 4096;
     config.buffer_size_tx = 4096;
 
@@ -171,13 +246,22 @@ static int postOnce(const std::string& url, const std::string& apiKey, const std
     }
 
     int status = -1;
+    auto& trust = getTrust();
+    trust.chain.clear();
     const esp_err_t openResult = esp_http_client_open(client, static_cast<int>(total));
+    if (openResult == ESP_OK && !trust.loggedWorkingChain && !trust.chain.empty()) {
+        trust.loggedWorkingChain = true;
+        appendLog("Cadena de certificados que funcionó:\n" + trust.chain);
+    }
     if (openResult != ESP_OK) {
         int tlsCode = 0;
         int tlsFlags = 0;
         const esp_err_t tlsError = esp_http_client_get_and_clear_last_tls_error(client, &tlsCode, &tlsFlags);
         failure = std::format("open {}, {} -0x{:X} {:X}, ram {}k/{}k", esp_err_to_name(openResult), esp_err_to_name(tlsError), -tlsCode, tlsFlags,
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
+        if (!trust.chain.empty()) {
+            appendLog("Cadena de certificados rechazada:\n" + trust.chain);
+        }
     } else {
         bool written = true;
         for (const auto& part : parts) {
