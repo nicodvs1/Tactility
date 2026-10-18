@@ -98,15 +98,12 @@ struct Part {
     size_t size;
 };
 
-/**
- * @param[out] failure where the request stopped, when it didn't complete
- * @return the HTTP status, or -1 when the request didn't complete
- */
-static int post(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, Buffer& response, std::string& failure) {
+static int postOnce(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, Buffer& response, std::string& failure) {
     esp_http_client_config_t config {};
     config.url = url.c_str();
     config.method = HTTP_METHOD_POST;
     config.timeout_ms = 45000;
+    config.addr_type = HTTP_ADDR_TYPE_INET;
     config.crt_bundle_attach = esp_crt_bundle_attach;
     config.buffer_size = 4096;
     config.buffer_size_tx = 4096;
@@ -127,7 +124,11 @@ static int post(const std::string& url, const std::string& apiKey, const std::ve
     int status = -1;
     const esp_err_t openResult = esp_http_client_open(client, static_cast<int>(total));
     if (openResult != ESP_OK) {
-        failure = std::format("open {}", esp_err_to_name(openResult));
+        int tlsCode = 0;
+        int tlsFlags = 0;
+        const esp_err_t tlsError = esp_http_client_get_and_clear_last_tls_error(client, &tlsCode, &tlsFlags);
+        failure = std::format("open {}, {} -0x{:X} {:X}, ram {}k/{}k", esp_err_to_name(openResult), esp_err_to_name(tlsError), -tlsCode, tlsFlags,
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024);
     } else {
         bool written = true;
         for (const auto& part : parts) {
@@ -178,6 +179,21 @@ static bool isWifiConnected() {
     wifi_get_station_state(wifi, &state);
     device_put(wifi);
     return state == WIFI_STATION_STATE_CONNECTED;
+}
+
+/**
+ * Retries once when the connection couldn't be opened.
+ * @param[out] failure where the request stopped, when it didn't complete
+ * @return the HTTP status, or -1 when the request didn't complete
+ */
+static int post(const std::string& url, const std::string& apiKey, const std::vector<Part>& parts, Buffer& response, std::string& failure) {
+    int status = postOnce(url, apiKey, parts, response, failure);
+    if (status < 0 && failure.starts_with("open")) {
+        LOG_W(TAG, "Retrying after %s", failure.c_str());
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        status = postOnce(url, apiKey, parts, response, failure);
+    }
+    return status;
 }
 
 static std::string describeHttpError(int status, const Buffer& response, const std::string& failure) {
