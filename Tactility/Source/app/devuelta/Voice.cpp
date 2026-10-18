@@ -7,10 +7,9 @@
 #include <cmath>
 #include <cstring>
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
-#include <freertos/stream_buffer.h>
-#include <freertos/task.h>
+#include <tactility/freertos/freertos.h>
+#include <tactility/freertos/semphr.h>
+#include <tactility/freertos/task.h>
 
 #include <atomic>
 
@@ -18,7 +17,10 @@
 #include <driver/gpio.h>
 #include <esp_heap_caps.h>
 #include <freertos/idf_additions.h>
+#include <freertos/stream_buffer.h>
 #include <sdkconfig.h>
+#else
+#include <stream_buffer.h>
 #endif
 
 namespace tt::app::devuelta {
