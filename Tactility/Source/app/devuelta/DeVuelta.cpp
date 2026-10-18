@@ -149,10 +149,6 @@ struct Context {
     time_t lastAlarmRing = 0;
     int alarmRings = 0;
 
-    // LVGL task only
-    uint32_t exitPressStart = 0;
-    bool exitSent = false;
-
     // Widgets, only valid while the window has live widgets
     lv_obj_t* root = nullptr;
     lv_obj_t* clockLabel = nullptr;
@@ -419,20 +415,25 @@ lv_obj_t* createCenterArea(lv_obj_t* parent, int32_t height) {
     return area;
 }
 
-constexpr uint32_t EXIT_HOLD_MILLIS = 5000;
-
-void onClockPressed(lv_event_t* event) {
-    auto* ctx = static_cast<Context*>(lv_event_get_user_data(event));
-    ctx->exitPressStart = lv_tick_get();
-    ctx->exitSent = false;
-}
-
-void onClockHeld(lv_event_t* event) {
-    auto* ctx = static_cast<Context*>(lv_event_get_user_data(event));
-    if (!ctx->exitSent && lv_tick_elaps(ctx->exitPressStart) >= EXIT_HOLD_MILLIS) {
-        ctx->exitSent = true;
-        send(ctx, Command::Exit);
-    }
+/** Small exit button in the top left corner, outside the flex layout */
+void createExitButton(Context* ctx, lv_obj_t* parent) {
+    auto* button = lv_button_create(parent);
+    lv_obj_set_floating(button, true);
+    lv_obj_set_size(button, LV_DPX(40), LV_DPX(40));
+    lv_obj_align(button, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(button, COLOR_SECONDARY, LV_STATE_DEFAULT);
+    lv_obj_set_style_shadow_width(button, 0, LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(button, COLOR_BORDER, LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(button, 1, LV_STATE_DEFAULT);
+    auto* label = lv_label_create(button);
+    lv_label_set_text(label, "\u00D7");
+    lv_obj_set_style_text_font(label, ctx->fonts.body, LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(label, COLOR_MUTED, LV_STATE_DEFAULT);
+    lv_obj_center(label);
+    auto* action = new ButtonAction { ctx, Command::Exit, 0 };
+    lv_obj_add_event_cb(button, onButtonClicked, LV_EVENT_SHORT_CLICKED, action);
+    lv_obj_add_event_cb(button, onButtonDeleted, LV_EVENT_DELETE, action);
 }
 
 std::string getVolumeText() {
@@ -447,10 +448,6 @@ void renderHome(Context* ctx, lv_obj_t* root) {
     const tm local = getLocalTime();
 
     auto* header = createColumn(root);
-    lv_obj_set_clickable(header, true);
-    // Hidden exit for the team: hold the clock for 5 seconds
-    lv_obj_add_event_cb(header, onClockPressed, LV_EVENT_PRESSED, ctx);
-    lv_obj_add_event_cb(header, onClockHeld, LV_EVENT_LONG_PRESSED_REPEAT, ctx);
     ctx->clockLabel = createLabel(header, getClockText(local), ctx->fonts.clock, COLOR_TEXT);
     lv_obj_set_style_text_align(ctx->clockLabel, LV_TEXT_ALIGN_CENTER, LV_STATE_DEFAULT);
     ctx->dateLabel = createLabel(header, getDateText(local), ctx->fonts.body, COLOR_MUTED);
@@ -489,6 +486,8 @@ void renderHome(Context* ctx, lv_obj_t* root) {
     auto* up = createButton(ctx, volumeRow, "+", Command::VolumeUp, 0, COLOR_SECONDARY, COLOR_TEXT);
     lv_obj_set_flex_grow(up, 0);
     lv_obj_set_width(up, LV_DPX(64));
+
+    createExitButton(ctx, root);
 }
 
 void renderListening(Context* ctx, lv_obj_t* root) {
