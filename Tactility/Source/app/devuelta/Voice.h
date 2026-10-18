@@ -38,6 +38,9 @@ enum class Tone {
 
 void playTone(Device* stream, Tone tone);
 
+/** Switches the speaker amplifier while nothing plays: off in the app, on when other apps may play sound */
+void setIdleAmp(bool enabled);
+
 /** The physical button, wired between the GPIO and ground */
 class Button {
     int pin;

@@ -31,6 +31,7 @@
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <ctime>
 #include <format>
@@ -54,6 +55,9 @@ constexpr time_t ALARM_REPEAT_SECONDS = 120;
 constexpr int ALARM_MAX_REPEATS = 5;
 constexpr int MAX_FORM_TURNS = 12;
 constexpr float VOLUME_STEP = 15.0f;
+constexpr size_t LEVEL_BAR_COUNT = 4;
+#define LEVEL_BAR_WIDTH LV_DPX(26)
+#define LEVEL_BAR_MAX_HEIGHT LV_DPX(150)
 
 // Colors of the De Vuelta website
 const lv_color_t COLOR_BACKGROUND = lv_color_hex(0xFBF7F0);
@@ -154,7 +158,8 @@ struct Context {
     lv_obj_t* clockLabel = nullptr;
     lv_obj_t* dateLabel = nullptr;
     lv_obj_t* volumeLabel = nullptr;
-    lv_obj_t* levelCircle = nullptr;
+    lv_obj_t* levelBars[LEVEL_BAR_COUNT] = {};
+    float barLevels[LEVEL_BAR_COUNT] = {};
 };
 
 // region Time
@@ -489,12 +494,28 @@ void renderHome(Context* ctx, lv_obj_t* root) {
 void renderListening(Context* ctx, lv_obj_t* root) {
     auto* title = createLabel(root, "Le escucho...", ctx->fonts.title, COLOR_SAGE);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_STATE_DEFAULT);
-    auto* area = createCenterArea(root, LV_DPX(220));
-    ctx->levelCircle = createTalkCircle(ctx, area, LV_DPX(130), "Listo", COLOR_SAGE, Command::StopTalk);
+    auto* area = createCenterArea(root, LV_DPX(190));
+    auto* bars = lv_obj_create(area);
+    lv_obj_remove_style_all(bars);
+    lv_obj_set_size(bars, LV_SIZE_CONTENT, LV_PCT(100));
+    lv_obj_set_flex_flow(bars, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bars, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(bars, LV_DPX(14), LV_STATE_DEFAULT);
+    lv_obj_set_scrollable(bars, false);
+    lv_obj_center(bars);
+    for (size_t i = 0; i < LEVEL_BAR_COUNT; i++) {
+        auto* bar = lv_obj_create(bars);
+        lv_obj_remove_style_all(bar);
+        lv_obj_set_size(bar, LEVEL_BAR_WIDTH, LEVEL_BAR_WIDTH);
+        lv_obj_set_style_radius(bar, LV_RADIUS_CIRCLE, LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(bar, COLOR_SAGE, LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_STATE_DEFAULT);
+        ctx->levelBars[i] = bar;
+        ctx->barLevels[i] = 0;
+    }
     auto* text = createLabel(root, ctx->text.empty() ? "Hable con calma. Cuando termine, espere un momento." : ctx->text, ctx->fonts.body, COLOR_TEXT);
     lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, LV_STATE_DEFAULT);
-    auto* hint = createLabel(root, "O apriete el botón para terminar", ctx->fonts.body, COLOR_MUTED);
-    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, LV_STATE_DEFAULT);
+    createFullWidthButton(ctx, root, "Terminar", Command::StopTalk, 0, COLOR_SAGE, COLOR_WHITE);
 }
 
 void renderThinking(Context* ctx, lv_obj_t* root) {
@@ -629,7 +650,7 @@ void render(Context* ctx) {
     ctx->clockLabel = nullptr;
     ctx->dateLabel = nullptr;
     ctx->volumeLabel = nullptr;
-    ctx->levelCircle = nullptr;
+    std::fill(std::begin(ctx->levelBars), std::end(ctx->levelBars), nullptr);
     lv_obj_set_style_bg_color(ctx->root, COLOR_BACKGROUND, LV_STATE_DEFAULT);
     switch (ctx->screen) {
         case Screen::Home: renderHome(ctx, ctx->root); break;
@@ -665,7 +686,7 @@ void destroyWidgets(void* userData) {
     ctx->clockLabel = nullptr;
     ctx->dateLabel = nullptr;
     ctx->volumeLabel = nullptr;
-    ctx->levelCircle = nullptr;
+    std::fill(std::begin(ctx->levelBars), std::end(ctx->levelBars), nullptr);
 }
 
 // endregion
@@ -687,13 +708,27 @@ void showMessage(Context* ctx, const std::string& title, const std::string& text
     show(ctx, Screen::Message, title, text);
 }
 
+/** Each bar wobbles at its own pace, so they move out of sync while the person talks */
 void updateLevel(Context* ctx, float level) {
+    constexpr float SPEEDS[LEVEL_BAR_COUNT] = { 7.1f, 11.3f, 8.7f, 13.9f };
+    constexpr float PHASES[LEVEL_BAR_COUNT] = { 0.0f, 1.9f, 3.7f, 5.3f };
     if (!lvgl_try_lock(10)) {
         return;
     }
-    if (ctx->levelCircle != nullptr) {
-        const int32_t width = LV_DPX(6) + static_cast<int32_t>(level * LV_DPX(40));
-        lv_obj_set_style_border_width(ctx->levelCircle, width, LV_STATE_DEFAULT);
+    const float seconds = static_cast<float>(lv_tick_get()) / 1000.0f;
+    // Quiet speech still shows clear movement
+    const float loudness = std::sqrt(std::clamp(level, 0.0f, 1.0f));
+    for (size_t i = 0; i < LEVEL_BAR_COUNT; i++) {
+        if (ctx->levelBars[i] == nullptr) {
+            continue;
+        }
+        const float wobble = 0.55f + 0.45f * std::sin(seconds * SPEEDS[i] + PHASES[i]);
+        const float target = loudness * wobble;
+        // Fast rise, slower fall
+        const float smoothing = target > ctx->barLevels[i] ? 0.6f : 0.25f;
+        ctx->barLevels[i] += (target - ctx->barLevels[i]) * smoothing;
+        const auto height = LEVEL_BAR_WIDTH + static_cast<int32_t>(ctx->barLevels[i] * (LEVEL_BAR_MAX_HEIGHT - LEVEL_BAR_WIDTH));
+        lv_obj_set_height(ctx->levelBars[i], height);
     }
     lvgl_unlock();
 }
@@ -1086,6 +1121,7 @@ int32_t appMain(int, char*[]) {
     if (ctx->stream != nullptr && service::audio::getOutputVolume() < 30.0f) {
         service::audio::setOutputVolume(70.0f);
     }
+    setIdleAmp(false);
 
     ctx->queue = xQueueCreate(8, sizeof(Message));
     ctx->workerDone = xSemaphoreCreateBinary();
@@ -1114,6 +1150,7 @@ int32_t appMain(int, char*[]) {
 
     ctx->running = false;
     xSemaphoreTake(ctx->workerDone, portMAX_DELAY);
+    setIdleAmp(true);
 
     window_manager_remove(window);
     check(app_event_unsubscribe(&subscription) == ERROR_NONE);

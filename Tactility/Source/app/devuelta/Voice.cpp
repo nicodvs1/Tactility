@@ -5,9 +5,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #ifdef ESP_PLATFORM
 #include <driver/gpio.h>
+#include <sdkconfig.h>
 #endif
 
 namespace tt::app::devuelta {
@@ -21,15 +23,49 @@ constexpr int CALIBRATION_FRAMES = 10;
 constexpr int SPEECH_START_FRAMES = 3;
 constexpr int SPEECH_END_FRAMES = 60;
 constexpr int NO_SPEECH_TIMEOUT_FRAMES = 7 * 50;
-constexpr float MIN_SPEECH_RMS = 300.0f;
+constexpr float MIN_SPEECH_RMS = 120.0f;
+constexpr float SPEECH_FACTOR = 2.0f;
+/** Below the speech threshold, but enough to send the audio anyway when nothing clearer was heard */
+constexpr float SOFT_SPEECH_FACTOR = 1.5f;
+constexpr float NORMALIZED_PEAK = 22000.0f;
+constexpr float MAX_GAIN = 8.0f;
 constexpr size_t PLAY_CHUNK_SAMPLES = 1024;
+constexpr uint32_t PADDING_MILLIS = 40;
+constexpr uint32_t FADE_IN_SAMPLES = SAMPLE_RATE / 200;
 
+/** RMS without the DC offset of the microphone */
 static float getRms(const int16_t* samples, size_t count) {
+    if (count == 0) {
+        return 0.0f;
+    }
+    double mean = 0;
+    for (size_t i = 0; i < count; i++) {
+        mean += samples[i];
+    }
+    mean /= count;
     double sum = 0;
     for (size_t i = 0; i < count; i++) {
-        sum += static_cast<double>(samples[i]) * samples[i];
+        const double value = samples[i] - mean;
+        sum += value * value;
     }
-    return count > 0 ? static_cast<float>(std::sqrt(sum / count)) : 0.0f;
+    return static_cast<float>(std::sqrt(sum / count));
+}
+
+/** Amplifies quiet recordings so Gemini hears them clearly */
+static void normalize(Pcm& audio) {
+    auto* samples = reinterpret_cast<int16_t*>(audio.samples.data());
+    const size_t count = audio.getSampleCount();
+    int peak = 1;
+    for (size_t i = 0; i < count; i++) {
+        peak = std::max(peak, std::abs(static_cast<int>(samples[i])));
+    }
+    const float gain = std::min(MAX_GAIN, NORMALIZED_PEAK / peak);
+    if (gain <= 1.0f) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        samples[i] = static_cast<int16_t>(std::clamp(samples[i] * gain, -32767.0f, 32767.0f));
+    }
 }
 
 RecordResult record(Device* stream, Pcm& audio, const std::function<void(float)>& onLevel, const std::function<bool()>& isStopRequested) {
@@ -48,7 +84,9 @@ RecordResult record(Device* stream, Pcm& audio, const std::function<void(float)>
     }
 
     int16_t frame[FRAME_SAMPLES];
-    float noiseFloor = 0;
+    // The quietest frame, so talking right away doesn't raise the threshold
+    float noiseFloor = 1e9f;
+    float peak = 0;
     int loudFrames = 0;
     int quietFrames = 0;
     bool speaking = false;
@@ -64,14 +102,15 @@ RecordResult record(Device* stream, Pcm& audio, const std::function<void(float)>
         audio.samples.append(frame, count * sizeof(int16_t));
 
         const float rms = getRms(frame, count);
-        onLevel(std::min(1.0f, rms / 4000.0f));
+        noiseFloor = std::min(noiseFloor, rms);
+        onLevel(std::min(1.0f, rms / std::max(noiseFloor * 8.0f, 1000.0f)));
 
         if (index < CALIBRATION_FRAMES) {
-            noiseFloor += rms / CALIBRATION_FRAMES;
             continue;
         }
+        peak = std::max(peak, rms);
 
-        const float threshold = std::max(noiseFloor * 2.5f, MIN_SPEECH_RMS);
+        const float threshold = std::max(noiseFloor * SPEECH_FACTOR, MIN_SPEECH_RMS);
         if (rms > threshold) {
             loudFrames++;
             quietFrames = 0;
@@ -87,18 +126,65 @@ RecordResult record(Device* stream, Pcm& audio, const std::function<void(float)>
             break;
         }
         if (!speaking && index >= NO_SPEECH_TIMEOUT_FRAMES) {
-            result = RecordResult::Silence;
+            const bool heardSomething = peak > noiseFloor * SOFT_SPEECH_FACTOR && peak > MIN_SPEECH_RMS / 2;
+            result = heardSomething ? RecordResult::Spoken : RecordResult::Silence;
             break;
         }
         if (isStopRequested()) {
-            result = speaking ? RecordResult::Spoken : RecordResult::Cancelled;
+            result = speaking || peak > noiseFloor * SOFT_SPEECH_FACTOR ? RecordResult::Spoken : RecordResult::Cancelled;
             break;
         }
     }
 
+    LOG_I(TAG, "Recorded %u ms, noise %.0f, peak %.0f, speech %d", static_cast<unsigned>(audio.getSampleCount() * 1000 / SAMPLE_RATE), noiseFloor, peak, speaking);
     audio_stream_close(handle);
     onLevel(0.0f);
+    if (result == RecordResult::Spoken) {
+        normalize(audio);
+    }
     return result;
+}
+
+// region Speaker amplifier
+
+/** The ES3C35P amplifier pops when the audio starts and stops, so it's only enabled while sound plays */
+constexpr int AMP_PIN = 1;
+
+static bool hasSwitchedAmp() {
+#if defined(ESP_PLATFORM) && defined(CONFIG_TT_DEVICE_ID)
+    return strcmp(CONFIG_TT_DEVICE_ID, "es3c35p") == 0;
+#else
+    return false;
+#endif
+}
+
+static void setAmpEnabled(bool enabled) {
+#ifdef ESP_PLATFORM
+    if (hasSwitchedAmp()) {
+        // Active low
+        gpio_set_level(static_cast<gpio_num_t>(AMP_PIN), enabled ? 0 : 1);
+    }
+#endif
+}
+
+void setIdleAmp(bool enabled) {
+    setAmpEnabled(enabled);
+}
+
+// endregion
+
+static bool writeSilence(AudioStreamHandle handle, uint32_t sampleRate, uint32_t millis) {
+    int16_t silence[256] = {};
+    size_t remaining = sampleRate * millis / 1000;
+    while (remaining > 0) {
+        const size_t count = std::min(remaining, std::size(silence));
+        size_t bytesWritten = 0;
+        if (audio_stream_write(handle, silence, count * sizeof(int16_t), &bytesWritten, pdMS_TO_TICKS(1000)) != ERROR_NONE) {
+            return false;
+        }
+        remaining -= count;
+    }
+    return true;
 }
 
 bool play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopRequested) {
@@ -109,22 +195,35 @@ bool play(Device* stream, const Pcm& audio, const std::function<bool()>& isStopR
         return false;
     }
 
+    // The amplifier turns on after the codec settled on silence, which avoids the pop
+    writeSilence(handle, audio.sampleRate, PADDING_MILLIS);
+    setAmpEnabled(true);
+    writeSilence(handle, audio.sampleRate, PADDING_MILLIS);
+
     bool completed = true;
     const int16_t* samples = audio.getSamples();
     const size_t total = audio.getSampleCount();
+    int16_t chunk[PLAY_CHUNK_SAMPLES];
     for (size_t offset = 0; offset < total; offset += PLAY_CHUNK_SAMPLES) {
         if (isStopRequested()) {
             completed = false;
             break;
         }
         const size_t count = std::min(PLAY_CHUNK_SAMPLES, total - offset);
+        for (size_t i = 0; i < count; i++) {
+            const size_t position = offset + i;
+            chunk[i] = position < FADE_IN_SAMPLES ? static_cast<int16_t>(samples[position] * position / FADE_IN_SAMPLES) : samples[position];
+        }
         size_t bytesWritten = 0;
-        if (audio_stream_write(handle, samples + offset, count * sizeof(int16_t), &bytesWritten, pdMS_TO_TICKS(1000)) != ERROR_NONE) {
+        if (audio_stream_write(handle, chunk, count * sizeof(int16_t), &bytesWritten, pdMS_TO_TICKS(1000)) != ERROR_NONE) {
             completed = false;
             break;
         }
     }
 
+    writeSilence(handle, audio.sampleRate, PADDING_MILLIS * 2);
+    setAmpEnabled(false);
+    writeSilence(handle, audio.sampleRate, PADDING_MILLIS);
     audio_stream_close(handle);
     return completed;
 }
