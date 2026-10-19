@@ -16,7 +16,6 @@
 #ifdef ESP_PLATFORM
 #include <driver/gpio.h>
 #include <esp_heap_caps.h>
-#include <freertos/idf_additions.h>
 #include <freertos/stream_buffer.h>
 #include <sdkconfig.h>
 #else
@@ -258,6 +257,10 @@ struct StreamPlayer::State {
     Device* stream = nullptr;
     std::function<bool()> isStopRequested;
     StreamBufferHandle_t queue = nullptr;
+#ifdef ESP_PLATFORM
+    StaticStreamBuffer_t queueStruct {};
+    uint8_t* queueStorage = nullptr;
+#endif
     SemaphoreHandle_t done = nullptr;
     TaskHandle_t task = nullptr;
     std::atomic<uint32_t> sampleRate = 0;
@@ -336,7 +339,11 @@ StreamPlayer::StreamPlayer(Device* stream, std::function<bool()> isStopRequested
     // 24 kHz is the rate of the Gemini speech
     constexpr size_t queueSize = STREAM_QUEUE_SECONDS * 24000 * sizeof(int16_t);
 #ifdef ESP_PLATFORM
-    state->queue = xStreamBufferCreateWithCaps(queueSize, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // Only the storage goes to PSRAM, the control structure stays in this object
+    state->queueStorage = static_cast<uint8_t*>(heap_caps_malloc(queueSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (state->queueStorage != nullptr) {
+        state->queue = xStreamBufferCreateStatic(queueSize, 1, state->queueStorage, &state->queueStruct);
+    }
 #else
     state->queue = xStreamBufferCreate(queueSize, 1);
 #endif
@@ -356,12 +363,11 @@ StreamPlayer::~StreamPlayer() {
         xSemaphoreTake(state->done, portMAX_DELAY);
     }
     if (state->queue != nullptr) {
-#ifdef ESP_PLATFORM
-        vStreamBufferDeleteWithCaps(state->queue);
-#else
         vStreamBufferDelete(state->queue);
-#endif
     }
+#ifdef ESP_PLATFORM
+    heap_caps_free(state->queueStorage);
+#endif
     if (state->done != nullptr) {
         vSemaphoreDelete(state->done);
     }
