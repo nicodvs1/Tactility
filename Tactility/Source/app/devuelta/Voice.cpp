@@ -252,10 +252,13 @@ constexpr size_t STREAM_QUEUE_SECONDS = 8;
 constexpr uint32_t STREAM_PREBUFFER_MILLIS = 1000;
 constexpr size_t STREAM_CHUNK_SAMPLES = 512;
 constexpr uint32_t STREAM_TASK_STACK = 6144;
+/** RMS of loud speech, which shows as the full level */
+constexpr float SPEECH_LEVEL_RMS = 5000.0f;
 
 struct StreamPlayer::State {
     Device* stream = nullptr;
     std::function<bool()> isStopRequested;
+    std::function<void(float)> onLevel;
     StreamBufferHandle_t queue = nullptr;
 #ifdef ESP_PLATFORM
     StaticStreamBuffer_t queueStruct {};
@@ -321,6 +324,12 @@ void StreamPlayer::run(void* parameter) {
                     state->result = PlayResult::Failed;
                     break;
                 }
+                if (state->onLevel) {
+                    state->onLevel(std::min(1.0f, getRms(chunk, count) / SPEECH_LEVEL_RMS));
+                }
+            }
+            if (state->onLevel) {
+                state->onLevel(0.0f);
             }
             writeSilence(handle, rate, PADDING_MILLIS * 2);
             setAmpEnabled(false);
@@ -335,9 +344,10 @@ void StreamPlayer::run(void* parameter) {
     vTaskDelete(nullptr);
 }
 
-StreamPlayer::StreamPlayer(Device* stream, std::function<bool()> isStopRequested) : state(new State()) {
+StreamPlayer::StreamPlayer(Device* stream, std::function<bool()> isStopRequested, std::function<void(float)> onLevel) : state(new State()) {
     state->stream = stream;
     state->isStopRequested = std::move(isStopRequested);
+    state->onLevel = std::move(onLevel);
     // 24 kHz is the rate of the Gemini speech
     constexpr size_t queueSize = STREAM_QUEUE_SECONDS * 24000 * sizeof(int16_t);
 #ifdef ESP_PLATFORM

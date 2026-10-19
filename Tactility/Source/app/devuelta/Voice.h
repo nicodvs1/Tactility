@@ -45,7 +45,8 @@ class StreamPlayer {
     static void run(void* parameter);
 
 public:
-    StreamPlayer(Device* stream, std::function<bool()> isStopRequested);
+    /** @param[in] onLevel receives the level (0 to 1) of what plays, on the player's own task */
+    StreamPlayer(Device* stream, std::function<bool()> isStopRequested, std::function<void(float)> onLevel = {});
     ~StreamPlayer();
     StreamPlayer(const StreamPlayer&) = delete;
     StreamPlayer& operator=(const StreamPlayer&) = delete;
