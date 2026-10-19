@@ -1,0 +1,75 @@
+Unable to find image 'espressif/idf:v6.1' locally
+v6.1: Pulling from espressif/idf
+0926a8eb0e60: Pulling fs layer
+87a7657aab4b: Pulling fs layer
+b308d72109cc: Pulling fs layer
+71acb9096687: Pulling fs layer
+bb3b8f52c9c1: Pulling fs layer
+f1206a11965a: Pulling fs layer
+dd4ff7637e4e: Pulling fs layer
+4f4fb700ef54: Pulling fs layer
+71acb9096687: Waiting
+bb3b8f52c9c1: Waiting
+f1206a11965a: Waiting
+dd4ff7637e4e: Waiting
+4f4fb700ef54: Waiting
+b308d72109cc: Verifying Checksum
+b308d72109cc: Download complete
+0926a8eb0e60: Verifying Checksum
+0926a8eb0e60: Download complete
+87a7657aab4b: Verifying Checksum
+87a7657aab4b: Download complete
+f1206a11965a: Verifying Checksum
+f1206a11965a: Download complete
+dd4ff7637e4e: Verifying Checksum
+dd4ff7637e4e: Download complete
+4f4fb700ef54: Verifying Checksum
+4f4fb700ef54: Download complete
+0926a8eb0e60: Pull complete
+bb3b8f52c9c1: Verifying Checksum
+bb3b8f52c9c1: Download complete
+71acb9096687: Verifying Checksum
+71acb9096687: Download complete
+87a7657aab4b: Pull complete
+b308d72109cc: Pull complete
+71acb9096687: Pull complete
+bb3b8f52c9c1: Pull complete
+f1206a11965a: Pull complete
+dd4ff7637e4e: Pull complete
+4f4fb700ef54: Pull complete
+Digest: sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c
+Status: Downloaded newer image for espressif/idf:v6.1
+Checking "python3" ...
+Python 3.12.3
+"python3" has been detected
+Activating ESP-IDF 6.1
+Setting IDF_PATH to '/opt/esp/idf'.
+* Checking python version ... 3.12.3
+* Checking python dependencies ... OK
+* Deactivating the current ESP-IDF environment (if any) ... OK
+* Establishing a new ESP-IDF environment ... OK
+* Identifying shell ... bash
+* Detecting outdated tools in system ... OK - no outdated tools found
+* Shell completion ... Autocompletion code generated
+
+Done! You can now compile ESP-IDF projects.
+Go to the project directory and run:
+
+  idf.py build
+0x422b503e: vPortTaskWrapper at /opt/esp/idf/components/freertos/FreeRTOS-Kernel/portable/xtensa/port.c:147
+0x42054f7a: tt::app::devuelta::(anonymous namespace)::workerMain(void*) at /app/nicodvs1/Tactility/build/../Tactility/Source/app/devuelta/DeVuelta.cpp:1088
+0x42054bc4: tt::app::devuelta::(anonymous namespace)::handle(tt::app::devuelta::(anonymous namespace)::Context*, tt::app::devuelta::Button&, tt::app::devuelta::(anonymous namespace)::Message const&) at /app/nicodvs1/Tactility/build/../Tactility/Source/app/devuelta/DeVuelta.cpp:1030 (discriminator 1)
+0x42054903: tt::app::devuelta::(anonymous namespace)::converse(tt::app::devuelta::(anonymous namespace)::Context*, tt::app::devuelta::Button&, tt::app::devuelta::Mode, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) at /app/nicodvs1/Tactility/build/../Tactility/Source/app/devuelta/DeVuelta.cpp:944
+0x42053b53: tt::app::devuelta::(anonymous namespace)::speak(tt::app::devuelta::(anonymous namespace)::Context*, tt::app::devuelta::Button&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&) at /app/nicodvs1/Tactility/build/../Tactility/Source/app/devuelta/DeVuelta.cpp:874
+0x4205562b: tt::app::devuelta::StreamPlayer::~StreamPlayer() at /opt/esp/idf/components/freertos/esp_additions/include/freertos/idf_additions.h:551
+ (inlined by) tt::app::devuelta::StreamPlayer::~StreamPlayer() at /app/nicodvs1/Tactility/build/../Tactility/Source/app/devuelta/Voice.cpp:360
+0x42008cf5: vStreamBufferGenericDeleteWithCaps at /opt/esp/idf/components/freertos/esp_additions/idf_additions.c:442
+0x40376c6e: heap_caps_free at /opt/esp/idf/components/heap/heap_caps_base.c:86
+0x4038cf68: multi_heap_free_impl at /opt/esp/idf/components/heap/multi_heap.c:240
+0x4038d0c2: tlsf_free at /opt/esp/idf/components/heap/tlsf/tlsf.c:630 (discriminator 3)
+0x403884b5: __assert_func at /opt/esp/idf/components/esp_libc/src/assert.c:81
+0x4038a93d: esp_system_abort at /opt/esp/idf/components/esp_system/port/esp_system_chip.c:87
+0x4038a975: panic_abort at /opt/esp/idf/components/esp_system/panic.c:500
+0x4037f6a8: _xt_handle_exc at /opt/esp/idf/components/xtensa/xtensa_vectors.S:830
+0x40376401: xt_unhandled_exception at /opt/esp/idf/components/esp_system/port/panic_handler.c:307
+0x4200503f: panic_handler at /opt/esp/idf/components/esp_system/port/panic_handler.c:264
