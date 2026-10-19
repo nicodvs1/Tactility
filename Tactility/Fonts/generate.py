@@ -3,6 +3,7 @@
 Generates the font resources:
 - Data/system/fonts/AdwaitaSans.ttf: text font TTF subset with the supported characters
 - Data/system/fonts/AdwaitaMono.ttf: monospace font TTF subset for the terminal (ASCII)
+- Data/system/fonts/AtkinsonRegular.ttf and AtkinsonBold.ttf: Atkinson Hyperlegible Next subsets for low vision readers (Spanish)
 - Tactility/Private/Tactility/lvgl/FontVersions.h: versions of the subsets, for font cache invalidation
 
 The fonts are rasterized from the TTF subsets on device. The text fonts include every character of
@@ -19,6 +20,8 @@ from fontTools.varLib import instancer
 
 # Variable font weight of the text font: 100 (Thin) to 900 (Black), 400 is Regular
 TEXT_WEIGHT = 550
+ATKINSON_REGULAR_WEIGHT = 400
+ATKINSON_BOLD_WEIGHT = 700
 
 # Inclusive ranges
 TEXT_CODEPOINT_RANGES = [
@@ -31,6 +34,24 @@ TEXT_CODEPOINT_RANGES = [
 
 MONO_CODEPOINT_RANGES = [
     (0x0020, 0x007E), # ASCII
+]
+
+# Spanish only, so both weights fit the system partition. Other characters fall back to the text font.
+ATKINSON_CODEPOINT_RANGES = [
+    (0x0020, 0x007E), # ASCII
+    (0x00A0, 0x00A1), # No-break space, ¡
+    (0x00AB, 0x00AB), # «
+    (0x00B0, 0x00B0), # °
+    (0x00B7, 0x00B7), # ·
+    (0x00BB, 0x00BB), # »
+    (0x00BF, 0x00BF), # ¿
+    (0x00C1, 0x00C1), (0x00C9, 0x00C9), (0x00CD, 0x00CD), (0x00D1, 0x00D1), (0x00D3, 0x00D3), (0x00DA, 0x00DA), (0x00DC, 0x00DC),
+    (0x00E1, 0x00E1), (0x00E9, 0x00E9), (0x00ED, 0x00ED), (0x00F1, 0x00F1), (0x00F3, 0x00F3), (0x00FA, 0x00FA), (0x00FC, 0x00FC),
+    (0x2013, 0x2014), # Dashes
+    (0x2018, 0x2019), # Single quotes
+    (0x201C, 0x201D), # Double quotes
+    (0x2022, 0x2022), # Bullet
+    (0x2026, 0x2026), # Ellipsis
 ]
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -63,6 +84,8 @@ def generate_subset(source_file: str, output_file: str, codepoint_ranges: list, 
 
 text_version = generate_subset("AdwaitaSans-Regular.ttf", "AdwaitaSans.ttf", TEXT_CODEPOINT_RANGES, TEXT_WEIGHT)
 mono_version = generate_subset("AdwaitaMono-Regular.ttf", "AdwaitaMono.ttf", MONO_CODEPOINT_RANGES)
+atkinson_regular_version = generate_subset("AtkinsonHyperlegibleNext-Variable.ttf", "AtkinsonRegular.ttf", ATKINSON_CODEPOINT_RANGES, ATKINSON_REGULAR_WEIGHT)
+atkinson_bold_version = generate_subset("AtkinsonHyperlegibleNext-Variable.ttf", "AtkinsonBold.ttf", ATKINSON_CODEPOINT_RANGES, ATKINSON_BOLD_WEIGHT)
 
 print(f"Generating {version_header_path}")
 with open(version_header_path, "w") as f:
@@ -71,3 +94,5 @@ with open(version_header_path, "w") as f:
     f.write("// The versions change whenever the TTF subsets change\n")
     f.write(f"#define TT_TEXT_FONT_VERSION 0x{text_version:08X}u\n")
     f.write(f"#define TT_MONO_FONT_VERSION 0x{mono_version:08X}u\n")
+    f.write(f"#define TT_ATKINSON_REGULAR_FONT_VERSION 0x{atkinson_regular_version:08X}u\n")
+    f.write(f"#define TT_ATKINSON_BOLD_FONT_VERSION 0x{atkinson_bold_version:08X}u\n")

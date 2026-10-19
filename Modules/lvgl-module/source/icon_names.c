@@ -78,6 +78,9 @@ const char* const lvgl_icon_shared_names[] = {
     "save",
     "save_as",
     "folder_open",
+    "medication",
+    "check_circle",
+    "schedule",
 };
 
 const size_t lvgl_icon_shared_name_count = sizeof(lvgl_icon_shared_names) / sizeof(lvgl_icon_shared_names[0]);

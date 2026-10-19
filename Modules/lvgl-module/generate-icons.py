@@ -206,6 +206,10 @@ shared_symbol_code_point_names = [
     "save",
     "save_as",
     "folder_open",
+    # De Vuelta app
+    "medication",
+    "check_circle",
+    "schedule",
 ]
 
 # Get more from https://fonts.google.com/icons?icon.set=Material+Symbols&icon.style=Rounded
