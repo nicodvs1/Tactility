@@ -1,0 +1,36 @@
+name: Decode backtrace
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Run that built the firmware
+        required: true
+      addresses:
+        description: Backtrace addresses
+        required: true
+permissions:
+  contents: write
+  actions: read
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Tactility-es3c35p-symbols
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: symbols
+      - name: Decode
+        env:
+          ADDRESSES: ${{ inputs.addresses }}
+        run: |
+          elf=$(ls symbols/*.elf | head -1)
+          docker run --rm -v "$PWD:/w" -w /w -e ADDRESSES -e ELF="$elf" espressif/idf:v6.1 bash -c 'xtensa-esp32s3-elf-addr2line -pfiaC -e "$ELF" $ADDRESSES' > backtrace.txt 2>&1 || true
+          cat backtrace.txt
+      - name: Publish
+        run: |
+          mkdir out && cp backtrace.txt out/ && cd out
+          git init -q && git add backtrace.txt
+          git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm backtrace
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" HEAD:refs/heads/debug-backtrace
