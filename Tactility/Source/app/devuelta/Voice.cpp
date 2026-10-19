@@ -249,7 +249,7 @@ PlayResult play(Device* stream, const Pcm& audio, const std::function<bool()>& i
 /** Seconds of speech the queue holds while the network is faster than the speaker */
 constexpr size_t STREAM_QUEUE_SECONDS = 8;
 /** Played once this much audio is queued, so short network hiccups don't cut the speech */
-constexpr uint32_t STREAM_PREBUFFER_MILLIS = 300;
+constexpr uint32_t STREAM_PREBUFFER_MILLIS = 1000;
 constexpr size_t STREAM_CHUNK_SAMPLES = 512;
 constexpr uint32_t STREAM_TASK_STACK = 6144;
 
@@ -306,6 +306,8 @@ void StreamPlayer::run(void* parameter) {
                     if (state->finishing && xStreamBufferIsEmpty(state->queue)) {
                         break;
                     }
+                    // Without new samples the I2S DMA repeats its last buffer, which sounds like a stuck vowel
+                    writeSilence(handle, rate, 20);
                     continue;
                 }
                 const size_t count = bytes / sizeof(int16_t);
