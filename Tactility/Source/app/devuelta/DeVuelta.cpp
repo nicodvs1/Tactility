@@ -7,6 +7,7 @@
 
 #include <Tactility/lvgl/FontCache.h>
 #include <Tactility/lvgl/FontVersions.h>
+#include <Tactility/lvgl/SystemBars.h>
 #include <Tactility/service/audio/Audio.h>
 #include <Tactility/settings/DisplaySettings.h>
 
@@ -614,12 +615,13 @@ Device* findAudioStream() {
 }
 
 /**
- * The screens are laid out for landscape, so a portrait display turns while the app runs.
+ * The screens fill a landscape display, so the system bars hide and a portrait display turns while the app runs.
  * @return the rotation to restore
  */
-lv_display_rotation_t rotateToLandscape() {
+lv_display_rotation_t takeOverScreen() {
     using settings::display::Orientation;
     lvgl_lock();
+    lvgl::systemBarsSetHidden(true);
     auto* display = lv_display_get_default();
     const auto previous = lv_display_get_rotation(display);
     const auto orientation = settings::display::fromLvglDisplayRotation(previous);
@@ -630,9 +632,10 @@ lv_display_rotation_t rotateToLandscape() {
     return previous;
 }
 
-void restoreRotation(lv_display_rotation_t rotation) {
+void releaseScreen(lv_display_rotation_t rotation) {
     lvgl_lock();
     lv_display_set_rotation(lv_display_get_default(), rotation);
+    lvgl::systemBarsSetHidden(false);
     lvgl_unlock();
 }
 
@@ -662,7 +665,7 @@ int32_t appMain(int, char*[]) {
     AppEventSubscription subscription {};
     check(app_event_subscribe(&subscription, &eventGroup) == ERROR_NONE);
 
-    ctx->previousRotation = rotateToLandscape();
+    ctx->previousRotation = takeOverScreen();
     WindowId window = window_manager_create(ctx->appInstanceId, createWidgets, ctx);
 
     // TLS needs a large stack
@@ -684,7 +687,7 @@ int32_t appMain(int, char*[]) {
     setIdleAmp(true);
 
     window_manager_remove(window);
-    restoreRotation(ctx->previousRotation);
+    releaseScreen(ctx->previousRotation);
     check(app_event_unsubscribe(&subscription) == ERROR_NONE);
     task_event_group_destruct(&eventGroup);
     unloadFonts(ctx->fonts);

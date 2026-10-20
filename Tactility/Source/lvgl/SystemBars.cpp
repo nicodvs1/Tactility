@@ -30,6 +30,7 @@ struct SystemBarsState {
     lv_display_t* display = nullptr;
     SystemBarsLayout layout = SystemBarsLayout::Split;
     bool applied = false;
+    bool hidden = false;
     // Where the current press of a pointer started, for swipes from the top edge
     lv_point_t pressPoint = { 0, 0 };
     SystemBarsListenerId nextListenerId = 1;
@@ -53,7 +54,7 @@ void onPointerPressed(lv_event_t* event) {
 
 // In the side layout, the top edge has no statusbar to swipe down from, so a swipe down that starts there opens the system menu
 void onPointerReleased(lv_event_t* event) {
-    if (state.layout != SystemBarsLayout::Side || window_manager_get_active_layer() != WINDOW_LAYER_APP) {
+    if (state.layout != SystemBarsLayout::Side || state.hidden || window_manager_get_active_layer() != WINDOW_LAYER_APP) {
         return;
     }
     lv_indev_t* indev = getEventIndev(event);
@@ -126,6 +127,7 @@ void systemBarsAttach(lv_obj_t* container, lv_obj_t* statusbar, lv_obj_t* appCon
     state.appContainer = appContainer;
     state.display = lv_obj_get_display(container);
     state.applied = false;
+    lv_obj_set_hidden(statusbar, state.hidden);
     lv_display_add_event_cb(state.display, onResolutionChanged, LV_EVENT_RESOLUTION_CHANGED, nullptr);
     systemBarsRefresh();
 }
@@ -167,6 +169,13 @@ void systemBarsRefresh() {
     const auto listeners = state.listeners;
     for (const auto& listener : listeners) {
         listener.callback();
+    }
+}
+
+void systemBarsSetHidden(bool hidden) {
+    state.hidden = hidden;
+    if (state.statusbar != nullptr) {
+        lv_obj_set_hidden(state.statusbar, hidden);
     }
 }
 

@@ -33,6 +33,13 @@ void systemBarsDetach();
 void systemBarsRefresh();
 
 /**
+ * Hides the system bars, so the app fills the screen, or shows them again.
+ * While hidden, the swipe from the top edge doesn't open the system menu.
+ * @warning Caller must hold the LVGL lock.
+ */
+void systemBarsSetHidden(bool hidden);
+
+/**
  * @warning Caller must hold the LVGL lock.
  * @return the layout that is shown
  */
